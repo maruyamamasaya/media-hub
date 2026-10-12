@@ -57,6 +57,8 @@ SQLite WAL + foreign_keys。`photos`はID・資産ID・SHA256・撮影日時・J
 ## Authentication
 新Webはloopback限定でログインなし。Host/origin制限、別サイトからのアクセスとサイズ不明multipartを拒否する。本番モードは起動しない。Web本番認証は未実装。
 
+iOSのフォルダ参照はFile Importerでユーザーが選んだディレクトリへのsecurity-scoped bookmarkをApplication Support/PhotoHub/folders.jsonに保存する。SQLiteは端末内に置き、Photoの任意folderSourceに固定Root UUIDと相対パスを保持。FolderSyncがNSFileCoordinatorによる原本読み取りとSHA-256照合を行い、派生だけ端末のキャッシュへ保存する。AWS ObjectStore経路とは独立。仕様・制限は [iOSフォルダ同期](docs/IOS-FOLDER-SYNC.md)。
+
 既存iOS/AWS:
 Cognito Hosted UI Code + PKCE S256。refresh tokenはKeychain、署名URLは保存しない。API Gateway JWT authorizer + LambdaのOwnerSubチェック。開発用ローカル保存は独立したテスト用経路。
 

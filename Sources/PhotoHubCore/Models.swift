@@ -2,6 +2,11 @@ import Foundation
 
 public enum UploadState: String, Codable, Sendable { case pending, uploading, uploaded, failed, deleting }
 public enum ImageKind: String, CaseIterable, Codable, Sendable { case original, thumbnail, display }
+public struct FolderSource: Codable, Equatable, Sendable {
+    public var rootID: String
+    public var relativePath: String
+    public init(rootID: String, relativePath: String) { self.rootID = rootID; self.relativePath = relativePath }
+}
 public struct Photo: Codable, Identifiable, Equatable, Sendable {
     public var id: String
     public var assetID: String
@@ -17,6 +22,7 @@ public struct Photo: Codable, Identifiable, Equatable, Sendable {
     public var favorite: Bool
     public var error: String?
     public var keys: [String: String]
+    public var folderSource: FolderSource?
     public init(id: String = UUID().uuidString.lowercased(), assetID: String, filename: String, capturedAt: Date, mime: String, bytes: Int64, width: Int, height: Int, sha256: String) {
         self.id = id; self.assetID = assetID; self.filename = filename; self.capturedAt = capturedAt
         self.importedAt = Date(); self.mime = mime; self.bytes = bytes; self.width = width; self.height = height
@@ -46,7 +52,7 @@ public struct Backup: Codable, Sendable {
         let ids = Set(photos.map(\.id)), albumIDs = Set(albums.map(\.id))
         guard ids.count == photos.count, albumIDs.count == albums.count, albums.allSatisfy({ UUID(uuidString: $0.id)?.uuidString.lowercased() == $0.id && !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { throw HubError.invalidBackup }
         for photo in photos {
-            guard UUID(uuidString: photo.id)?.uuidString.lowercased() == photo.id, photo.state == .uploaded else { throw HubError.invalidBackup }
+            guard UUID(uuidString: photo.id)?.uuidString.lowercased() == photo.id, photo.state == .uploaded, photo.folderSource == nil else { throw HubError.invalidBackup }
             for kind in ImageKind.allCases {
                 guard photo.keys[kind.rawValue] == ObjectKeys.photo(owner: owner, id: photo.id, kind: kind) else { throw HubError.invalidBackup }
             }

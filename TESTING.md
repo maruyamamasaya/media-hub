@@ -35,6 +35,8 @@ iOS統合テストは実行先シミュレータを選んで追加する（重�
 xcodebuild -project ios/PhotoHub.xcodeproj -scheme PhotoHub -destination 'platform=iOS Simulator,id=YOUR_SIMULATOR_ID' -derivedDataPath /tmp/photo-hub-xcode CODE_SIGNING_ALLOWED=NO test
 ```
 
+フォルダ同期はIntegrationTestsでローカル外部フォルダの登録・改名・内容変更・欠損・再指定・再起動・キャッシュ再生成・原本を残す削除を確認する。実iCloudの取得待ちとFile Importerの権限継続は [iOSフォルダ同期の実機確認](docs/IOS-FOLDER-SYNC.md) を別途行う。
+
 ## Lint / Format / Typecheck / Unit / Integration / E2E / Build
 | 対象 | 実在する入口 |
 | --- | --- |

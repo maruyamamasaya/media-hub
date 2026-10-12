@@ -9,6 +9,8 @@ Mac・Windowsアプリ試作は [DESKTOP-OPERATIONS.md](docs/DESKTOP-OPERATIONS.
 
 アプリの設定は既定で「開発用ローカル保存」。写真タブの＋で取り込み、設定から未完了アップロードを実行する。ローカルDB・pending原本・DevelopmentObjectsはアプリのApplication Support/PhotoHub、派生キャッシュはCaches/PhotoHub。開発用保存は同じ端末のため、容量解放・再インストール復元の代わりにはならない。
 
+iOSの「設定 → フォルダ同期 → フォルダを追加」からiCloud Drive／このiPhone内の画像フォルダを選択する。登録時に同期し、以降は「同期する」で反映する。AWS設定・ログインは不要。原本と制限・確認手順は [iOSフォルダ同期](docs/IOS-FOLDER-SYNC.md)。AWS接続は現在保留。
+
 開発フォルダでのローカル検証は `sh scripts/verify.sh`。テストの一時オブジェクトはOSの一時ディレクトリに生成し終了時に除去する。アプリのローカル保存を確認するには `xcrun simctl get_app_container <Simulator ID> personal.photohub data` で場所を取得する。個人の写真やJSONをGitへ追加しない。
 
 ## 実機インストール
@@ -46,5 +48,6 @@ AWSリソースはまだ作成していない。AWS CLI / SAM CLIは現在の環
 - オフライン: DBと保存済みキャッシュを表示する。未キャッシュ画像は取得できない。
 - 容量不足: 既存原本は勝手に消さず、キャッシュを削除する。pending原本の救済には写真ライブラリの元写真も残す。
 - Xcodeのsandbox/cacheエラー: 通常のローカルXcode環境で実行する。エージェント環境では標準キャッシュ利用の権限が必要な場合がある。
+- 署名なしDebugビルドを既存資産でオフライン署名する場合: PhotoHub.debug.dylib／__preview.dylibなどの内包ライブラリも先に署名し、アプリ全体を最後に署名する。ライブラリを個別に検証し、インストール後はlaunch成功だけでなく後続のprocess一覧で動作継続を確認する。詳細は [実機更新記録](sessions/2026-10-12-ios-folder-deploy.md)。
 
 `.gitignore`で.env、開発データ、Xcode個人設定を除外する。サンプルにも秘密値を記載しない。

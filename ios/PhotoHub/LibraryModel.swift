@@ -10,6 +10,8 @@ final class LibraryModel: ObservableObject {
     @Published var message: String?
     @Published var busy = false
     @Published var progress: [String: Double] = [:]
+    @Published var folders: [LibraryFolder] = []
+    @Published var folderResults: [String: String] = [:]
     @Published var localMode: Bool { didSet { UserDefaults.standard.set(localMode, forKey: "localMode") } }
     @Published var configuration: CloudConfiguration { didSet { if let data = try? JSONEncoder().encode(configuration) { UserDefaults.standard.set(data, forKey: "cloudConfiguration") } } }
     let authentication = Authentication()
@@ -33,6 +35,10 @@ final class LibraryModel: ObservableObject {
             try FileManager.default.createDirectory(at: pending, withIntermediateDirectories: true)
             repository = try Repository(url: support.appendingPathComponent("library.sqlite"))
             cache = try DiskCache(root: cacheURL ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("PhotoHub"))
+            let folderFile = support.appendingPathComponent("folders.json")
+            if FileManager.default.fileExists(atPath: folderFile.path) {
+                folders = try JSONDecoder().decode([LibraryFolder].self, from: Data(contentsOf: folderFile))
+            }
             try repository?.recoverInterruptedUploads(); try refresh()
         } catch { message = error.localizedDescription }
     }
@@ -62,6 +68,72 @@ final class LibraryModel: ObservableObject {
     func source(_ photo: Photo, _ kind: ImageKind) -> URL {
         pending.appendingPathComponent(photo.id).appendingPathComponent(kind == .original ? "original" : "\(kind.rawValue).jpg")
     }
+    func registerFolder(_ url: URL, replacing id: String? = nil) async {
+        await run {
+            let folder = try LibraryFolder.selected(url, id: id ?? UUID().uuidString.lowercased())
+            var updated = folders
+            if let index = updated.firstIndex(where: { $0.id == folder.id }) { updated[index] = folder }
+            else {
+                guard !updated.contains(where: { (try? $0.resolve().standardizedFileURL) == url.standardizedFileURL }) else {
+                    throw FolderSync.error("このフォルダはすでに登録されています。登録済みフォルダの「同期する」を使ってください。")
+                }
+                updated.append(folder)
+            }
+            try JSONEncoder().encode(updated).write(to: support.appendingPathComponent("folders.json"), options: .atomic)
+            folders = updated
+            try await synchronize(folder)
+        }
+    }
+    func syncFolder(_ folder: LibraryFolder) async {
+        await run { try await synchronize(folder) }
+    }
+    private func synchronize(_ folder: LibraryFolder) async throws {
+        guard let repository else { throw HubError.configuration }
+        folderResults[folder.id] = "同期中…"
+        let scan: FolderScan
+        do { scan = try await Task.detached(priority: .userInitiated) { try FolderSync.scan(folder) }.value }
+        catch { folderResults[folder.id] = "読み込めません。通信を確認するか、フォルダを選び直してください。"; throw error }
+        var current = try repository.photos()
+        var added = 0, matched = 0, moved = 0, changed = 0, missing = 0, limited = 0
+        let grouped = Dictionary(grouping: scan.photos, by: \.sha256)
+        for hash in grouped.keys.sorted() {
+            guard let candidates = grouped[hash] else { continue }
+            let existing = current.first { $0.sha256 == hash }
+            let candidate = candidates.first { $0.folderSource == existing?.folderSource }
+                ?? candidates.sorted { ($0.folderSource?.relativePath ?? "") < ($1.folderSource?.relativePath ?? "") }[0]
+            if var existing {
+                if existing.folderSource?.rootID == folder.id, existing.state != .deleting {
+                    if existing.folderSource != candidate.folderSource { moved += 1 }
+                    else { matched += 1 }
+                    existing.filename = candidate.filename; existing.folderSource = candidate.folderSource; existing.error = nil
+                    try repository.save(existing)
+                    if let index = current.firstIndex(where: { $0.id == existing.id }) { current[index] = existing }
+                } else { matched += 1 }
+            } else if current.contains(where: { $0.folderSource == candidate.folderSource }) {
+                // An edited file does not silently replace the previously registered image.
+                continue
+            } else if added < 100 {
+                try repository.save(candidate); current.append(candidate); added += 1
+            } else { limited += 1 }
+        }
+        let hashesByPath = Dictionary(scan.photos.compactMap { photo in
+            photo.folderSource.map { ($0.relativePath, photo.sha256) }
+        }, uniquingKeysWith: { first, _ in first })
+        for var photo in current where photo.folderSource?.rootID == folder.id && photo.state != .deleting {
+            guard let path = photo.folderSource?.relativePath else { continue }
+            if let hash = hashesByPath[path], hash != photo.sha256 {
+                photo.error = "原本の内容が変更されています。以前の画像と整理情報は保持しています。"; changed += 1
+                try repository.save(photo)
+            } else if scan.complete && !scan.seenPaths.contains(path) {
+                photo.error = "原本が見つかりません。フォルダを確認して再同期してください。"; missing += 1
+                try repository.save(photo)
+            }
+        }
+        let summary = "新規 \(added)／一致 \(matched)／移動 \(moved)／変更 \(changed)／欠損 \(missing)／失敗 \(scan.failures)"
+            + (scan.waiting > 0 ? "。iCloudから取得待ち \(scan.waiting)件。時間を置いて再同期してください。" : "")
+            + (limited > 0 ? "。新規100件まで登録しました。もう一度同期してください。" : "")
+        folderResults[folder.id] = summary; message = summary
+    }
     func image(_ photo: Photo, kind: ImageKind) async -> URL? {
         guard let cache else { return nil }
         if let cached = cache.cached(id: photo.id, kind: kind) { return cached }
@@ -70,6 +142,16 @@ final class LibraryModel: ObservableObject {
         let identifier = photo.id + kind.rawValue
         if let task = imagesInFlight[identifier] { return await task.value }
         let task = Task<URL?, Never> { [self] in
+            if let reference = photo.folderSource {
+                guard let folder = folders.first(where: { $0.id == reference.rootID }) else { return nil }
+                let destination = cache.file(id: photo.id, kind: kind)
+                do {
+                    try await Task.detached(priority: .userInitiated) {
+                        try FolderSync.preview(photo, folder: folder, kind: kind, destination: destination)
+                    }.value
+                    try cache.trim(); return cache.cached(id: photo.id, kind: kind)
+                } catch { return nil }
+            }
             guard let store = objectStore, let key = photo.keys[kind.rawValue], key == ObjectKeys.photo(owner: store.owner, id: photo.id, kind: kind) else { return nil }
             do {
                 let destination = cache.file(id: photo.id, kind: kind)
@@ -84,7 +166,7 @@ final class LibraryModel: ObservableObject {
     func uploadPending() async {
         await run {
             guard let repository, let store = objectStore else { throw HubError.configuration }
-            for var photo in try repository.photos() where photo.state != .uploaded && photo.state != .deleting {
+            for var photo in try repository.photos() where photo.folderSource == nil && photo.state != .uploaded && photo.state != .deleting {
                 do {
                     // Never migrate existing objects silently between development and AWS owners.
                     guard photo.keys.isEmpty || photo.keys.values.allSatisfy({ $0.hasPrefix("users/\(store.owner)/") }) else { throw HubError.configuration }
@@ -129,7 +211,7 @@ final class LibraryModel: ObservableObject {
         await run {
             guard let store = objectStore else { throw HubError.configuration }
             guard !localMode else { throw NSError(domain: "PhotoHub", code: 2, userInfo: [NSLocalizedDescriptionKey: "開発用保存は同じ端末内です。原本の容量解放はAWS保存の確認後に利用できます。"] ) }
-            for photo in photos where photo.state == .uploaded {
+            for photo in photos where photo.folderSource == nil && photo.state == .uploaded {
                 for kind in ImageKind.allCases {
                     guard let key = photo.keys[kind.rawValue], key == ObjectKeys.photo(owner: store.owner, id: photo.id, kind: kind), let info = try await store.head(key: key), info.bytes > 0 else { throw HubError.integrity }
                     if kind == .original { guard info.bytes == photo.bytes && info.checksum == photo.sha256 else { throw HubError.integrity } }
@@ -143,6 +225,17 @@ final class LibraryModel: ObservableObject {
     func saveOriginal(_ photo: Photo) async {
         await run {
             let file = source(photo, .original)
+            defer { if photo.folderSource != nil { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) } }
+            if let reference = photo.folderSource {
+                guard let folder = folders.first(where: { $0.id == reference.rootID }) else { throw HubError.missingOriginal }
+                try await Task.detached(priority: .userInitiated) {
+                    try FolderSync.read(photo, folder: folder) { original in
+                        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
+                        try FileManager.default.copyItem(at: original, to: file)
+                    }
+                }.value
+            }
             if !FileManager.default.fileExists(atPath: file.path) {
                 guard let store = objectStore, let key = photo.keys[ImageKind.original.rawValue], key == ObjectKeys.photo(owner: store.owner, id: photo.id, kind: .original) else { throw HubError.configuration }
                 try await store.get(key: key, destination: file)
@@ -159,6 +252,9 @@ final class LibraryModel: ObservableObject {
     }
     func backup() async {
         await run {
+            guard !photos.contains(where: { $0.folderSource != nil }) else {
+                throw FolderSync.error("フォルダ参照の整理情報のバックアップは準備中です。原本は登録したフォルダに保持されています。")
+            }
             guard let repository, let store = objectStore else { throw HubError.configuration }
             guard photos.allSatisfy({ $0.state == .uploaded }) else { throw NSError(domain: "PhotoHub", code: 3, userInfo: [NSLocalizedDescriptionKey: "未完了のアップロードと削除を完了してからバックアップしてください。"]) }
             let snapshot = try repository.snapshot(owner: store.owner), encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

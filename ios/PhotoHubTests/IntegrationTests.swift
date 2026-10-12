@@ -6,6 +6,87 @@ import PhotoHubCore
 
 @MainActor
 final class IntegrationTests: XCTestCase {
+    func testFolderBatchLimitAndExternalSymlinkExclusion() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let external = root.appendingPathComponent("external/sub")
+        try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+        for index in 0..<101 {
+            let image = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).image { context in
+                UIColor(red: CGFloat(index) / 101, green: 0, blue: 0, alpha: 1).setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+            }
+            try XCTUnwrap(image.pngData()).write(to: external.appendingPathComponent("\(index).png"))
+        }
+        let outside = root.appendingPathComponent("outside.png")
+        try Data("outside".utf8).write(to: outside)
+        try FileManager.default.createSymbolicLink(at: external.appendingPathComponent("link.png"), withDestinationURL: outside)
+        let model = LibraryModel(baseURL: root.appendingPathComponent("library"), cacheURL: root.appendingPathComponent("cache"))
+        await model.registerFolder(external.deletingLastPathComponent())
+        XCTAssertEqual(model.photos.count, 100)
+        XCTAssertTrue(model.folderResults.values.first?.contains("新規100件") == true)
+        await model.syncFolder(try XCTUnwrap(model.folders.first))
+        XCTAssertEqual(model.photos.count, 101)
+        XCTAssertFalse(model.photos.contains { $0.filename == "link.png" })
+        XCTAssertTrue(model.photos.allSatisfy { $0.folderSource?.relativePath.hasPrefix("sub/") == true })
+    }
+    func testFolderSyncRenameChangeMissingReconnectionAndSafeDeletion() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let external = root.appendingPathComponent("external")
+        try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 20)).image { context in
+            UIColor.systemGreen.setFill(); context.fill(CGRect(x: 0, y: 0, width: 40, height: 20))
+        }
+        let originalData = try XCTUnwrap(image.pngData())
+        let original = external.appendingPathComponent("one.png")
+        try originalData.write(to: original)
+        let base = root.appendingPathComponent("library"), cache = root.appendingPathComponent("cache")
+        let model = LibraryModel(baseURL: base, cacheURL: cache)
+        await model.registerFolder(external)
+        let first = try XCTUnwrap(model.photos.first), folder = try XCTUnwrap(model.folders.first)
+        XCTAssertEqual(model.photos.count, 1)
+        XCTAssertNotNil(first.folderSource)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: model.source(first, .original).path))
+        model.setFavorite(first); model.addAlbum(name: "フォルダ")
+        model.toggleMembership(photo: first, album: try XCTUnwrap(model.albums.first))
+        let preview = await model.image(first, kind: .display)
+        XCTAssertNotNil(preview)
+        let renamed = external.appendingPathComponent("renamed.png")
+        try FileManager.default.moveItem(at: original, to: renamed)
+        await model.syncFolder(folder)
+        XCTAssertEqual(model.photos.first?.id, first.id)
+        XCTAssertEqual(model.photos.first?.filename, "renamed.png")
+        XCTAssertEqual(model.photos.first?.favorite, true)
+        XCTAssertEqual(model.members.count, 1)
+        let differentImage = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 20)).image { context in
+            UIColor.red.setFill(); context.fill(CGRect(x: 0, y: 0, width: 40, height: 20))
+        }
+        try XCTUnwrap(differentImage.pngData()).write(to: renamed)
+        await model.syncFolder(folder)
+        XCTAssertEqual(model.photos.count, 1)
+        XCTAssertEqual(model.photos.first?.sha256, first.sha256)
+        XCTAssertNotNil(model.photos.first?.error)
+        try FileManager.default.removeItem(at: renamed)
+        await model.syncFolder(folder)
+        XCTAssertTrue(model.photos.first?.error?.contains("見つかりません") == true)
+        try originalData.write(to: renamed)
+        await model.syncFolder(folder)
+        XCTAssertNil(model.photos.first?.error)
+        let movedRoot = root.appendingPathComponent("moved")
+        try FileManager.default.moveItem(at: external, to: movedRoot)
+        await model.registerFolder(movedRoot, replacing: folder.id)
+        let reopened = LibraryModel(baseURL: base, cacheURL: root.appendingPathComponent("new-cache"))
+        XCTAssertEqual(reopened.folders.first?.id, folder.id)
+        await reopened.syncFolder(try XCTUnwrap(reopened.folders.first))
+        XCTAssertEqual(reopened.photos.first?.id, first.id)
+        XCTAssertEqual(reopened.photos.first?.favorite, true)
+        let regenerated = await reopened.image(try XCTUnwrap(reopened.photos.first), kind: .thumbnail)
+        XCTAssertNotNil(regenerated)
+        await reopened.requestDelete(try XCTUnwrap(reopened.photos.first))
+        XCTAssertTrue(reopened.photos.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: movedRoot.appendingPathComponent("renamed.png").path))
+    }
     func testImageUploadBackupEmptyDatabaseRestoreAndDeletion() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

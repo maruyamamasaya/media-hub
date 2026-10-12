@@ -11,6 +11,7 @@
 | Web起動・検証 | `scripts/setup-web.ps1`, `start-web.ps1`, `verify-web.ps1`, `benchmark-library.py` | `127.0.0.1:8765`, `.local`, `TestClient` | Web verify、1,000件API測定 |
 | アプリ入口・画面 | `ios/PhotoHub/PhotoHubApp.swift`, `Views.swift` | `PhotoHubApp`, `RootView`, `PhotoGrid`, `PhotoDetail`, `SettingsView` | シミュレータ手動、実機チェックリスト |
 | 原本取り込み・派生 | `ios/PhotoHub/PhotoImporter.swift` | `importAsset`, `PHAssetResource`, `derivatives` | `IntegrationTests`、実写真手動 |
+| iOSフォルダ・iCloud Drive参照 | `ios/PhotoHub/FolderSync.swift`, `LibraryModel.swift`, `Views.swift`, `Sources/PhotoHubCore/Models.swift` | `LibraryFolder`, `FolderSync`, `registerFolder`, `syncFolder`, `folderSource`, `FolderSettingsView` | `testFolderSyncRenameChangeMissingReconnectionAndSafeDeletion`, `testLegacyPhotoDecodingAndFolderReferencePersistence` |
 | 写真モデル・SQLite | `Sources/PhotoHubCore/Models.swift`, `Repository.swift` | `Photo`, `UploadState`, `photos`, `albums`, `memberships`, `recoverInterruptedUploads` | `Tests/PhotoHubCoreTests/CoreTests.swift` |
 | アップロードと再試行 | `Sources/PhotoHubCore/PhotoTransfer.swift`, `ios/PhotoHub/LibraryModel.swift` | `PhotoTransfer.upload`, `uploadPending`, `head`, `checksum` | `testPartialUploadThenRetryKeepsStableID`, `testFailedUploadPreservesPendingOriginalAndRecovers` |
 | 本人認証・S3通信 | `ios/PhotoHub/Cloud.swift` | `Authentication`, `ASWebAuthenticationSession`, `S3ObjectStore`, `token`, `/objects` | 実AWS結合は未実施 |

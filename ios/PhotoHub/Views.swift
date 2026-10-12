@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import PhotosUI
 import Photos
 import PhotoHubCore
@@ -46,7 +47,7 @@ struct PhotoGrid: View {
     }
     var body: some View {
         ScrollView {
-            if visible.isEmpty { ContentUnavailableView("写真がありません", systemImage: "photo", description: Text("右上の＋から写真を取り込めます。")) }
+            if visible.isEmpty { ContentUnavailableView("写真がありません", systemImage: "photo", description: Text("右上の＋から写真を取り込むか、設定で画像フォルダを登録できます。")) }
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
                 ForEach(visible) { photo in
                     NavigationLink { PhotoDetail(initialID: photo.id, photoIDs: visible.map(\.id)) } label: {
@@ -76,12 +77,13 @@ struct PhotoGrid: View {
                             .overlay(alignment: .topTrailing) {
                                 HStack(spacing: 4) {
                                     if photo.favorite { Image(systemName: "heart.fill") }
-                                    if photo.state != .uploaded { Image(systemName: photo.state == .failed ? "exclamationmark.icloud" : "icloud.and.arrow.up") }
+                                    if photo.folderSource != nil { Image(systemName: photo.error == nil ? "folder" : "exclamationmark.triangle") }
+                                    else if photo.state != .uploaded { Image(systemName: photo.state == .failed ? "exclamationmark.icloud" : "icloud.and.arrow.up") }
                                 }
                                 .font(.caption2).foregroundStyle(.white)
                                 .padding(6).background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 4))
                                 .padding(6)
-                                .opacity(photo.favorite || photo.state != .uploaded ? 1 : 0)
+                                .opacity(photo.favorite || photo.folderSource != nil || photo.state != .uploaded ? 1 : 0)
                             }
                             .clipShape(RoundedRectangle(cornerRadius: 5))
                     }.buttonStyle(.plain)
@@ -224,7 +226,8 @@ struct PhotoDetail: View {
                 VStack(spacing: 5) {
                     Text(photo.capturedAt, format: .dateTime.year().month().day().hour().minute()).font(.caption)
                     Text("\(photo.filename) · \(ByteCountFormatter.string(fromByteCount: photo.bytes, countStyle: .file))").font(.caption2).foregroundStyle(.secondary)
-                    if photo.state != .uploaded { Text(photo.error ?? "保存先へ未送信です").font(.caption).foregroundStyle(.orange) }
+                    if photo.folderSource != nil { Text(photo.error ?? "登録フォルダの原本を参照しています").font(.caption).foregroundStyle(photo.error == nil ? Color.secondary : Color.orange) }
+                    else if photo.state != .uploaded { Text(photo.error ?? "保存先へ未送信です").font(.caption).foregroundStyle(.orange) }
                     if let progress = library.progress[photo.id], photo.state == .uploading { ProgressView(value: progress) }
                     HStack {
                         Button { library.setFavorite(photo) } label: { Image(systemName: photo.favorite ? "heart.fill" : "heart") }
@@ -239,7 +242,7 @@ struct PhotoDetail: View {
             }
         }.navigationTitle("写真").navigationBarTitleDisplayMode(.inline)
         .onAppear { if current.isEmpty { current = initialID } }
-        .confirmationDialog("アプリから写真を削除しますか？原本・派生画像・整理情報を削除します。iPhoneの写真ライブラリは変更しません。", isPresented: $confirmDelete, titleVisibility: .visible) {
+        .confirmationDialog(photo?.folderSource != nil ? "アプリの登録と整理情報を削除しますか？選択フォルダの原本は残ります。次回の同期で再登録されます。" : "アプリから写真を削除しますか？原本・派生画像・整理情報を削除します。iPhoneの写真ライブラリは変更しません。", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("削除", role: .destructive) { if let photo { Task { await library.requestDelete(photo); dismiss() } } }
         }
     }
@@ -261,6 +264,10 @@ struct SettingsView: View {
     @State private var releaseConfirmation = false
     var body: some View {
         Form {
+            Section {
+                NavigationLink("フォルダ同期") { FolderSettingsView() }
+                Text("iCloud DriveやこのiPhone内の画像フォルダを選んで読み込みます。").font(.caption)
+            }
             Section("保存先") {
                 Toggle("開発用ローカル保存", isOn: $library.localMode)
                 Text(library.localMode ? "このiPhone内のテスト用保存です。機種変更・再インストールには使えません。" : "AWSへの保存には設定と本人ログインが必要です。").font(.caption)
@@ -292,5 +299,44 @@ struct SettingsView: View {
         }.navigationTitle("設定").disabled(library.busy)
         .confirmationDialog("最新の正常なバックアップから復元します。バックアップ後の変更は含まれません。", isPresented: $restoreConfirmation, titleVisibility: .visible) { Button("復元") { Task { await library.restore() } } }
         .confirmationDialog("S3保存を再確認してアプリ内の原本コピーを解放します。iPhoneの写真ライブラリは変更しません。", isPresented: $releaseConfirmation, titleVisibility: .visible) { Button("解放") { Task { await library.releaseOriginals() } } }
+    }
+}
+
+struct FolderSettingsView: View {
+    @EnvironmentObject var library: LibraryModel
+    @State private var selecting = false
+    @State private var replacingID: String?
+    var body: some View {
+        Form {
+            Section {
+                Text("「ファイル」から画像フォルダを登録します。原本はフォルダに置いたまま、サブフォルダも含めて読み込みます。")
+                Button("フォルダを追加") { replacingID = nil; selecting = true }
+            }
+            ForEach(library.folders) { folder in
+                Section(folder.name) {
+                    Button("同期する") { Task { await library.syncFolder(folder) } }
+                    Button("フォルダを選び直す") { replacingID = folder.id; selecting = true }
+                    if let result = library.folderResults[folder.id] { Text(result).font(.caption).accessibilityLabel(result) }
+                }
+            }
+            Section {
+                Text("同じ内容の改名・移動では、お気に入りとアルバムを引き継ぎます。欠損や内容変更は通知し、登録済みの画像情報を残します。新規登録は1回100件までです。")
+                Text("iCloud上の未取得画像はダウンロードを要求します。取得待ちと表示された場合は、時間を置いてもう一度同期してください。")
+                Text("フォルダの画像は端末ごとに登録します。お気に入り・アルバムなどの整理情報の端末間同期は準備中です。")
+            }.font(.caption)
+        }
+        .navigationTitle("フォルダ同期")
+        .navigationBarTitleDisplayMode(.inline)
+        .disabled(library.busy)
+        .fileImporter(isPresented: $selecting, allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
+            switch result {
+            case .success(let urls):
+                if let url = urls.first {
+                    let id = replacingID
+                    Task { await library.registerFolder(url, replacing: id) }
+                }
+            case .failure(let error): library.message = error.localizedDescription
+            }
+        }
     }
 }

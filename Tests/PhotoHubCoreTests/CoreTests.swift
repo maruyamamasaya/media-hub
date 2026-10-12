@@ -6,6 +6,19 @@ final class CoreTests: XCTestCase {
     override func setUpWithError() throws { root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString); try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true) }
     override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
     func sample(_ asset: String = "asset") -> Photo { Photo(assetID: asset, filename: "test.heic", capturedAt: Date(timeIntervalSince1970: 100), mime: "image/heic", bytes: 42, width: 100, height: 100, sha256: asset) }
+    func testLegacyPhotoDecodingAndFolderReferencePersistence() throws {
+        let legacy = try JSONEncoder().encode(sample())
+        XCTAssertNil(try JSONDecoder().decode(Photo.self, from: legacy).folderSource)
+        var photo = sample()
+        photo.folderSource = FolderSource(rootID: "root", relativePath: "images/test.heic")
+        photo.state = .uploaded
+        let db = try Repository(url: root.appendingPathComponent("folder.sqlite"))
+        try db.save(photo)
+        XCTAssertEqual(try db.photos(), [photo])
+        // A file-provider reference cannot be restored as an S3 object backup.
+        for kind in ImageKind.allCases { photo.keys[kind.rawValue] = ObjectKeys.photo(owner: "owner", id: photo.id, kind: kind) }
+        XCTAssertThrowsError(try Backup(owner: "owner", photos: [photo], albums: [], memberships: []).validate(owner: "owner"))
+    }
     func testPersistenceRecoveryAndDuplicatePrevention() throws {
         let url = root.appendingPathComponent("db.sqlite")
         do { let db = try Repository(url: url); var photo = sample(); photo.state = .uploading; try db.save(photo); XCTAssertThrowsError(try db.save(sample())); }
