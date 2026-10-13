@@ -2,6 +2,7 @@
 
 | Feature | Primary paths | Search keywords / Key entry points | Related tests |
 | --- | --- | --- | --- |
+| マイショート・動画 | `web/src/MyShort.tsx`, `local-api/vault/service.py`, `ios/PhotoHub/Views.swift`, `PhotoImporter.swift`, `LibraryModel.swift` | `MyShort`, `session_rank`, `video_preview`, `MyShortView`, `ShortVideo`, `videoDerivatives`, `loadPlayback` | `local-api/tests/test_my_short.py`, `desktop/short-smoke.cjs`, `IntegrationTests`（iOS未実行） |
 | Web画面 | `web/src/App.tsx`, `AssetDetail.tsx`, `Modal.tsx`, `api.ts` | `App`, `upload`, `retryImports`, `AssetDetail`, `fileUrl` | Web build、ブラウザ一連操作 |
 | Mac・Windowsアプリ試作 | `desktop/main.cjs`, `preload.cjs`, `api-process.cjs`, `platform.cjs`, `local-api/desktop_run.py` | `startApi`, `pythonExecutable`, `menuTemplate`, `activate`, `desktop_token`, `watch_parent` | `desktop/api-process.test.cjs`, `platform.test.cjs`, `local-api/tests/test_desktop.py`, `scripts/verify-desktop.ps1` / `verify-desktop.sh` |
 | ローカル素材API | `local-api/vault/app.py`, `service.py`, `repository.py`, `storage.py` | `create_app`, `Vault`, `process_item`, `recover`, `list_assets`, `require_revision` | `local-api/tests/test_vault.py` |

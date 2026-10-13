@@ -3,6 +3,6 @@
   "version": "0.1.0",
   "private": true,
   "main": "main.cjs",
-  "scripts": { "start": "electron .", "check": "node --check main.cjs && node --check api-process.cjs && node --check platform.cjs && node --check preload.cjs", "test": "node --test api-process.test.cjs platform.test.cjs mac-lifecycle.test.cjs", "smoke": "electron . --smoke-test" },
+  "scripts": { "start": "electron .", "check": "node --check main.cjs && node --check api-process.cjs && node --check platform.cjs && node --check preload.cjs", "test": "node --test api-process.test.cjs platform.test.cjs mac-lifecycle.test.cjs", "smoke": "electron . --smoke-test", "short-smoke": "electron short-smoke.cjs" },
   "devDependencies": { "electron": "^43.0.0" }
 }

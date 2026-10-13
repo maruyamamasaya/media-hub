@@ -106,3 +106,19 @@
 .settings-page .settings-body { padding:0; }
 .settings-page .settings-body > h3 { margin-top:32px; }
 @media(max-width:700px) { .settings-page { padding:24px 20px; } }
+
+.my-short { padding: 20px; max-width: 1200px; margin: auto; }
+.my-short h1 { margin: 0; }
+.short-filters, .short-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+.short-filters label, .short-actions label { display: flex; align-items: center; gap: 8px; }
+.short-stage { position: relative; height: max(280px, calc(100dvh - 330px)); background: #101916; color: white; display: flex; align-items: center; justify-content: center; border-radius: 16px; overflow: hidden; touch-action: none; overscroll-behavior: contain; }
+.short-stage img, .short-stage video { width: 100%; height: 100%; object-fit: contain; }
+.short-stage video { touch-action: none; }
+.short-placeholder { padding: 24px; text-align: center; }
+.short-loading { position: absolute; top: 12px; left: 12px; }
+.my-short footer { padding-top: 12px; }
+.my-short footer > span { margin-left: 16px; }
+@media (max-width: 600px) { .my-short { padding: 12px; } .short-stage { height: 55dvh; } .short-filters select, .short-actions select { max-width: 150px; } }
+
+.short-filters label, .short-actions label { white-space: nowrap; flex-shrink: 0; }
+.short-filters select, .short-actions select { width: auto; min-width: 90px; }

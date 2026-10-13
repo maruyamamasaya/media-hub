@@ -84,3 +84,6 @@ Windows試作は明示的な --web-library 起動により停止中のWebライ�
 ローカルDB v6はstorage_roots・local_sourcesで外部フォルダ参照と固定ID／SHA-256照合、remote_originals・transfer_cleanupで模擬転送と整理再試行を保持。Electron preload.cjsは選択したフォルダパスだけを返すIPCを公開し、API認証情報は公開しない。
 
 DB version 7はローカル素材のarchivedAtを解除（revision更新）する。アーカイブAPIはリモートのみ許可し、混在選択は全件拒否。コレクションの確認・更新対象もリモートのみ。ローカル転送・参照同期時は通常扱いへ戻す。原本・タグ・所属は保持する。
+
+## マイショートと動画
+WebはMyShort→既存一覧APIのsort=random/seed→display File配信。安定したハッシュ順位を既存カーソルに結び付け、メタデータを20件ずつ取得する。動画は原本保管後、任意FFmpegでJPEG thumbnailとH.264/AAC MP4 displayを生成し、失敗を原本から独立して記録する。iOS旧PhotoはAVFoundationでポスターとplayback.mp4を生成し、開発用保存では追加キーを照合転送する。AWS動画転送は拒否する。DB/共通DTOの構造変更はない。[仕様と制限](docs/MY-SHORT.md)。

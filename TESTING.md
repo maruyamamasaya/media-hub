@@ -60,3 +60,8 @@ SwiftLint、独立したSwift format/typecheckコマンド、CI/CD、継続実�
 
 ## 文書Verify自体の限界
 必須文書・必要項目・README導線・ローカルリンク先・文書の行数を確認する。外部URLの到達性、アンカー、文章とコードの意味的一致は判定しない。詳細を分割する時は役割ごとの正本へリンクする。
+
+## マイショートの追加検証
+Web/API標準検証後、`npm.cmd run short-smoke --prefix desktop`で隔離Chromium試験を実行する。合成WebMを派生出力の代わりに配置し、空、重複なし/戻る、ホイール連続、キーリピート抑止、タッチイベント、整理、詳細、動画ミュート/停止、原本を取得しないことを確認する。実FFmpeg変換は別途、対応動画を追加してJPEG thumbnail/MP4 display、変換失敗、ハッシュ一致、再生成、範囲取得を確認する。
+
+iOSではMacでSwift全テスト・iOS Build・IntegrationTests（動画失敗保全と開発用動画保存/復元の追加テスト）を実行し、実機で画像/動画取り込み、縦スワイプ、前へ、アルバム、詳細、タブ/背景で停止、音声、原本保存、復元後の派生だけの取得を確認する。AVFoundation実変換・Dynamic Type・VoiceOver・キャッシュ削除中の再生は未検証。[仕様](docs/MY-SHORT.md)。

@@ -78,8 +78,8 @@ def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_ori
             return {'extensions': [r[0] for r in db.execute("SELECT DISTINCT originalExtension FROM assets WHERE originalExtension!='' ORDER BY originalExtension")]}
 
     @app.get('/api/v1/assets')
-    def assets(q: str = '', view: str = 'all', kind: str = '', collection: str = '', sort: str = 'added', limit: int = Query(60, ge=1, le=100), cursor: str | None = None, tag: list[str] = Query(default=[]), extension: list[str] = Query(default=[]), order: str | None = None, archive: str = 'normal', location: str = 'all'):
-        return vault.list_assets(q, view, kind, collection, sort, limit, cursor, tag, extension, order, archive, location)
+    def assets(q: str = '', view: str = 'all', kind: str = '', collection: str = '', sort: str = 'added', limit: int = Query(60, ge=1, le=100), cursor: str | None = None, tag: list[str] = Query(default=[]), extension: list[str] = Query(default=[]), order: str | None = None, archive: str = 'normal', location: str = 'all', seed: str = ''):
+        return vault.list_assets(q, view, kind, collection, sort, limit, cursor, tag, extension, order, archive, location, seed)
 
     @app.post('/api/v1/import-local-directory')
     def import_local_directory():

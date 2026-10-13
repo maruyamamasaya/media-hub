@@ -81,11 +81,36 @@ final class LibraryModel: ObservableObject {
         imagesInFlight[identifier] = task
         let result = await task.value; imagesInFlight.removeValue(forKey: identifier); return result
     }
+    func playbackURL(_ photo: Photo) -> URL? {
+        // No original fallback and no network transfer for the legacy video model.
+        guard photo.mime.hasPrefix("video/") else { return nil }
+        let file = pending.appendingPathComponent(photo.id).appendingPathComponent("playback.mp4")
+        if FileManager.default.fileExists(atPath: file.path) { return file }
+        if let cached = cache?.root.appendingPathComponent("\(photo.id)-playback.mp4"), FileManager.default.fileExists(atPath: cached.path) {
+            try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: cached.path)
+            return cached
+        }
+        return nil
+    }
+    func loadPlayback(_ photo: Photo) async -> URL? {
+        if let file = playbackURL(photo) { return file }
+        guard photo.mime.hasPrefix("video/"), let cache, let store = objectStore,
+              let key = photo.keys["playback"], key == "users/\(store.owner)/photos/\(photo.id)/playback.mp4" else { return nil }
+        let destination = cache.root.appendingPathComponent("\(photo.id)-playback.mp4")
+        do {
+            try await store.get(key: key, destination: destination)
+            let bytes = try Digest.bytes(file: destination), sha = try Digest.checksum(file: destination)
+            guard let info = try await store.head(key: key), info.bytes == bytes, info.checksum == sha else { throw HubError.integrity }
+            try cache.trim()
+            return FileManager.default.fileExists(atPath: destination.path) ? destination : nil
+        } catch { try? FileManager.default.removeItem(at: destination); return nil }
+    }
     func uploadPending() async {
         await run {
             guard let repository, let store = objectStore else { throw HubError.configuration }
             for var photo in try repository.photos() where photo.state != .uploaded && photo.state != .deleting {
                 do {
+                    guard localMode || !photo.mime.hasPrefix("video/") else { throw NSError(domain: "PhotoHub", code: 4, userInfo: [NSLocalizedDescriptionKey: "動画は端末内に保管しています。クラウド転送は未対応です。原本と再生用動画は保持します。"]) }
                     // Never migrate existing objects silently between development and AWS owners.
                     guard photo.keys.isEmpty || photo.keys.values.allSatisfy({ $0.hasPrefix("users/\(store.owner)/") }) else { throw HubError.configuration }
                     for kind in ImageKind.allCases { photo.keys[kind.rawValue] = ObjectKeys.photo(owner: store.owner, id: photo.id, kind: kind) }
@@ -93,6 +118,14 @@ final class LibraryModel: ObservableObject {
                     let id = photo.id
                     try await PhotoTransfer.upload(photo: photo, directory: pending.appendingPathComponent(photo.id), store: store) { fraction in
                         Task { @MainActor [weak self] in self?.progress[id] = fraction }
+                    }
+                    if photo.mime.hasPrefix("video/") {
+                        guard let playback = playbackURL(photo) else { throw HubError.missingOriginal }
+                        let key = "users/\(store.owner)/photos/\(photo.id)/playback.mp4"
+                        photo.keys["playback"] = key
+                        let sha = try Digest.checksum(file: playback), size = try Digest.bytes(file: playback)
+                        try await store.put(file: playback, key: key, mime: "video/mp4", checksum: sha, progress: { _ in })
+                        guard let info = try await store.head(key: key), info.bytes == size, info.checksum == sha else { throw HubError.integrity }
                     }
                     photo.state = .uploaded; progress[photo.id] = 1
                 } catch { photo.state = .failed; photo.error = error.localizedDescription }
@@ -119,10 +152,15 @@ final class LibraryModel: ObservableObject {
                 try await store.delete(key: key)
             }
         }
+        if let key = photo.keys["playback"] {
+            guard let store = objectStore, key == "users/\(store.owner)/photos/\(photo.id)/playback.mp4" else { throw HubError.configuration }
+            try await store.delete(key: key)
+        }
         // Persisted deleting state survives partial remote deletion.
         try repository?.delete(photoID: photo.id)
         try? FileManager.default.removeItem(at: pending.appendingPathComponent(photo.id))
         for kind in [ImageKind.thumbnail, .display] { if let cache { try? FileManager.default.removeItem(at: cache.file(id: photo.id, kind: kind)) } }
+        if let cache { try? FileManager.default.removeItem(at: cache.root.appendingPathComponent("\(photo.id)-playback.mp4")) }
     }
     func retryDeletes() async { await run { for photo in photos where photo.state == .deleting { try await finishDelete(photo) }; message = "削除を完了しました。" } }
     func releaseOriginals() async {
@@ -152,7 +190,7 @@ final class LibraryModel: ObservableObject {
             guard status == .authorized || status == .limited else { throw HubError.configuration }
             try await PHPhotoLibrary.shared().performChanges {
                 let request = PHAssetCreationRequest.forAsset(); let options = PHAssetResourceCreationOptions(); options.originalFilename = photo.filename
-                request.addResource(with: .photo, fileURL: file, options: options)
+                request.addResource(with: photo.mime.hasPrefix("video/") ? .video : .photo, fileURL: file, options: options)
             }
             message = "写真ライブラリに原本を保存しました。"
         }

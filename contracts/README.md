@@ -1,7 +1,7 @@
 # Asset Library API v1
 正本はasset.schema.json。`python scripts/generate-contracts.py`でWeb型と独立したSwift DTOを生成し、`--check`でずれを検出する。文字列kind/role/stateは未知値でもデコードできる。日時はUTC ISO8601文字列、nullableはJSON null、サイズ・revisionは整数。既存PhotoHubCore.Photoと別モデル。
 
-APIは `/api/v1`。GET /assetsはq、view（all/favorites/archive/trash）、archive（normal/archived/all）、kind、collection、sort（added/name/captured/updated/size）、order（asc/desc）、tag（複数指定・全タグ一致）、extension（複数指定・いずれか一致）、limit（1–100）、cursorを受けAssetPageを返す。cursorは検索条件に結び付け、条件が変われば破棄する。
+APIは `/api/v1`。GET /assetsはq、view（all/favorites/archive/trash）、archive（normal/archived/all）、kind、collection、sort（added/name/captured/updated/size/random）、order（asc/desc）、tag（複数指定・全タグ一致）、extension（複数指定・いずれか一致）、limit（1–100）、cursorを受けAssetPageを返す。cursorは検索条件に結び付け、条件が変われば破棄する。
 
 POST /importsはmultipart files、GET /imports/{id}はImportJob、POST /imports/{id}/retryは保持済み失敗項目だけ再処理。POST /fixture-importsは設定済みテストフォルダを取り込む。GET /assets/{id}はAsset。PATCH /assets/{id}はrevisionとname/note/kind/favorite/tagIds/collectionIdsの任意変更を受ける。未知フィールドは拒否する。
 
@@ -40,3 +40,5 @@ GET /storage-rootsはStorageRoot配列。stateはready/missing。POST /sync-dire
 POST /assets/{id}/transferはTransferRequest（revision、destination local/development-remote、removeLocal bool）を受けAssetを返す。localではremoveLocal=false、development-remoteではtrueを必須とする。ごみ箱は400、revision／変更競合は409。remoteAvailableは対応するリモートコピーの登録有無、localCleanupPendingは転送成功後のローカル整理残り。再試行は最新revisionで同じremote転送を要求。転送・ダウンロード先は照合し、原本を保持し、ローカル転送時はarchivedAtを解除する。S3には接続しない。
 
 SQLite v7: ローカルの既存archivedAtを解除しrevisionを更新する。個別・選択アーカイブにローカルが含まれる場合は400で全件拒否。コレクションsummaryとtokenはリモート素材のみを対象とする。
+
+マイショートはsort=randomとseed（1–128文字）を指定。seedはcursorの条件にも含む。同じseedとAsset IDから安定したランダム順位を生成する。kindにvideoを追加。動画displayは閲覧用video/mp4、thumbnailはimage/jpeg、生成不能はfailedとerrorを返す。既存の文字列型契約を維持する。[動画仕様](../docs/MY-SHORT.md)。
