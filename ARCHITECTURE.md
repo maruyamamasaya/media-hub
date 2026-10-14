@@ -1,7 +1,7 @@
 # 現在の構成
 
 ## System Overview / Technology Stack
-Mac・Windows開発用シェルは `desktop/` のElectron。mainが `local-api/desktop_run.py` を子プロセスで起動し、共有Webビルドを同一originで表示する。空きloopbackポート、起動トークン、OSライブラリロック、stdin切断による停止を利用。`platform.cjs`がPythonパスとOSメニューを分岐。Macは閉じる操作後もAPIを維持しactivateで再表示、Windowsは最終ウィンドウ終了でアプリも終了する。試作保存は `.local/desktop-library`。Mac実機と配布時のランタイム同梱は未検証・未対応。[起動・検証](docs/DESKTOP-OPERATIONS.md)。
+現行Mac版は `macos/MediaHubMac/` のSwiftUI。MacRuntimeが既存Python APIを認証付きloopback子プロセスとして管理し、Swift DTOを介して送信・閲覧・軽量動画・鍵を操作する。作業領域は既存の `.local/desktop-library` を継承。Windows対応は終了。Electronの `desktop/` は旧試作の保全用。[Mac SwiftUI](docs/MAC-SWIFTUI.md)。
 
 ローカルWeb素材ライブラリはReact 19 / TypeScript / Vite 7、Python 3.12 / FastAPI / Pillow / 標準SQLite。127.0.0.1のAPIがWebビルドも配信する。新WebのDBと既存iOSのDBは独立し、同期は未接続。共通契約からWeb型・Swift DTOを生成する。
 
@@ -63,7 +63,7 @@ iOSのフォルダ参照はFile Importerでユーザーが選んだディレク�
 Cognito Hosted UI Code + PKCE S256。refresh tokenはKeychain、署名URLは保存しない。API Gateway JWT authorizer + LambdaのOwnerSubチェック。開発用ローカル保存は独立したテスト用経路。
 
 ## External Services / Deployment
-東京S3 Standard（原本・派生・JSON）、Cognito、Lambda、HTTP API、CloudWatch。クラウドDBなし。実AWSは未作成。設定は [OPERATIONS.md](OPERATIONS.md)。
+東京S3 Standard（原本・派生・JSON）、Cognito、Lambda、HTTP API、CloudWatch。クラウドDBなし。Web/PC接続準備用に独立した非公開S3スタックphoto-hub-storageを作成済み（storage.yaml）。アプリとの接続と既存iOS用認証/APIのデプロイは未実施。設定は [OPERATIONS.md](OPERATIONS.md)。
 
 ## Important Dependencies
 標準Appleフレームワーク・SQLite・Python標準ライブラリ。LambdaはAWSランタイムboto3を使う。XcodeGenはプロジェクト再生成時のみ。verifyはPython、Swift、Ruby、Xcode。CI/CDとsemantic indexは未導入。
@@ -86,3 +86,13 @@ Windows試作は明示的な --web-library 起動により停止中のWebライ�
 ローカルDB v6はstorage_roots・local_sourcesで外部フォルダ参照と固定ID／SHA-256照合、remote_originals・transfer_cleanupで模擬転送と整理再試行を保持。Electron preload.cjsは選択したフォルダパスだけを返すIPCを公開し、API認証情報は公開しない。
 
 DB version 7はローカル素材のarchivedAtを解除（revision更新）する。アーカイブAPIはリモートのみ許可し、混在選択は全件拒否。コレクションの確認・更新対象もリモートのみ。ローカル転送・参照同期時は通常扱いへ戻す。原本・タグ・所属は保持する。
+
+Mac手動S3アップロードは `vault/folder_upload.py` とWebのFolderUploader。選択・確認・明示開始、コピー送信、条件付きPUTとSHA-256 HEAD照合、全原本照合後に非公開のフォルダカタログJSONを確定。転送状態は独立した端末JSON、SQLite素材ライブラリは変更しない。監視・自動同期なし。詳細は [手動フォルダアップロード](docs/MANUAL-FOLDER-UPLOAD.md)。
+
+S3フォルダ閲覧はCloudFoldersと `/api/v1/folder-library`。最新の保存完了カタログをroot単位で選択し、既存SQLite素材とは独立して階層表示。ローカル原本の照合済みコピー／明示オープン時の固定S3版GETをファイルAPIで返す。原本は100MiB、キャッシュは500MiBで追加取得を停止する。
+
+2026-10-14の新方針: 原本の正本はS3、Mac手動アップロード、iOS閲覧専用。通常UIはCloudApp／CloudViewerRoot。旧ローカルUIは実行しない。閲覧API reader.handlerはCognito JWT＋本人sub検証、GET URLのみ。IAMもS3 Get/Listと専用ログのみ。構成と承認範囲は [S3 Reader](docs/S3-READER.md)。
+
+Macの手動軽量動画作成はLightVideoMaker→ループバックlight-videos API→ffprobe/ffmpeg。原本を読み、アプリデータ内の派生作業領域へ保存する。AWS通信は行わない。構成・保持と承認境界は [動画配信](docs/VIDEO-DELIVERY.md)。
+
+フォルダロックは非公開S3の管理JSONをMacが条件付き更新し、本人閲覧LambdaとMac APIが同じPBKDF2・HMAC認可処理で未解除の階層を除外する。iPhoneは解除APIとGETのみで設定を書かない。詳細は [フォルダロック](docs/FOLDER-LOCK.md)。

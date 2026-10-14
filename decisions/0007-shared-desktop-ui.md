@@ -1,6 +1,8 @@
 # 0007: Mac・WindowsでWeb UIを共有する構成案
 Date: 2026-10-07
-Status: proposed
+Status: superseded
+
+2026-10-14に [0014: Mac専用SwiftUI](0014-native-mac-swiftui.md) で置き換え。
 
 ## Context
 ユーザーは現UIを踏襲したMac・Windowsアプリの設計と開発のキャッチアップを希望。React WebとPython APIが存在し、デスクトップシェルは未実装。

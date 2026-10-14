@@ -1,6 +1,12 @@
+フォルダの鍵はMacの「S3フォルダ」で対象を開く→「このフォルダの鍵を設定」。本人が入力・保存し、iPhoneは「隠したフォルダを開く」で解除する。原本は変更しない。詳しくは [フォルダロック](docs/FOLDER-LOCK.md)。
+
+Macの軽量版作成は上部「軽量版を作る」から動画選択→作成→再生確認。Mac内の派生作業領域に保存し、原本は変更しない。作成後「S3へアップロード · 内容を確認」で保存先・容量・費用を確認し、チェックして手動送信する。軽量版は別フォルダとして保存。条件と容量は [動画配信](docs/VIDEO-DELIVERY.md)。
+
+現在の通常運用は [S3原本・Mac送信・iPhone閲覧](docs/S3-READER.md)。以下のローカル／旧iOS操作は旧版の保全・開発用記録。新UIでは取り込み・同期・ローカル保存を提供しない。
+
 # 開発・運用
 
-Mac・Windowsアプリ試作は [DESKTOP-OPERATIONS.md](docs/DESKTOP-OPERATIONS.md)。既存Web UIをElectronで表示し、独立した試作ライブラリを使う。Mac向け起動は実機未検証。
+Mac版はSwiftUI。通常起動は `sh scripts/start-desktop.sh`。Windows対応は終了。現行手順は [Mac SwiftUI](docs/MAC-SWIFTUI.md)。旧Electron試作は保全用に残す。
 
 新しいローカルWeb版の準備・起動・バックアップは [WEB-OPERATIONS.md](docs/WEB-OPERATIONS.md)。ルートの `scripts/setup-web.ps1` → `scripts/start-web.ps1` で `http://127.0.0.1:8765` を開く。Webと既存iOSの保存領域は別で、自動移行・同期は未接続。以下の手順は既存iOS版。
 
@@ -9,7 +15,7 @@ Mac・Windowsアプリ試作は [DESKTOP-OPERATIONS.md](docs/DESKTOP-OPERATIONS.
 
 アプリの設定は既定で「開発用ローカル保存」。写真タブの＋で取り込み、設定から未完了アップロードを実行する。ローカルDB・pending原本・DevelopmentObjectsはアプリのApplication Support/PhotoHub、派生キャッシュはCaches/PhotoHub。開発用保存は同じ端末のため、容量解放・再インストール復元の代わりにはならない。
 
-iOSの「設定 → フォルダ同期 → フォルダを追加」からiCloud Drive／このiPhone内の画像フォルダを選択する。登録時に同期し、以降は「同期する」で反映する。AWS設定・ログインは不要。原本と制限・確認手順は [iOSフォルダ同期](docs/IOS-FOLDER-SYNC.md)。AWS接続は現在保留。
+iOSの「設定 → フォルダ同期 → フォルダを追加」からiCloud Drive／このiPhone内の画像フォルダを選択する。登録時に同期し、以降は「同期する」で反映する。AWS設定・ログインは不要。原本と制限・確認手順は [iOSフォルダ同期](docs/IOS-FOLDER-SYNC.md)。AWS接続は2026-10-14に再開。
 
 開発フォルダでのローカル検証は `sh scripts/verify.sh`。テストの一時オブジェクトはOSの一時ディレクトリに生成し終了時に除去する。アプリのローカル保存を確認するには `xcrun simctl get_app_container <Simulator ID> personal.photohub data` で場所を取得する。個人の写真やJSONをGitへ追加しない。
 
@@ -33,7 +39,7 @@ Lambdaは `BUCKET` と `OWNER_SUB` が必須。JWTはAPI Gatewayが検証、Lamb
 - AWSセットアップと承認対象: [AWS-SETUP.md](docs/AWS-SETUP.md)
 - 実機の仕上げ: [DEVICE-CHECKLIST.md](docs/DEVICE-CHECKLIST.md)
 
-AWSリソースはまだ作成していない。AWS CLI / SAM CLIは現在の環境で未導入。テンプレートはYAML構文を確認したが、CloudFormation/SAMの意味的検証と実AWS検証は未実施。
+東京の非公開S3スタックphoto-hub-storageを作成済み。MacのAWS CLIは導入・photo-hubプロファイル認証済み。storage.yamlのCloudFormation検証・デプロイ・1 KiB往復照合を実AWSで実施済み。SAM CLIは未導入。既存iOS用認証・APIテンプレートのSAM検証とデプロイ、アプリのS3接続は未実施。詳細は [AWS設定](docs/AWS-SETUP.md)。
 
 ## バックアップ・機種変更
 全写真のアップロードと削除を完了してJSONバックアップを保存し、成功表示を確認する。新端末・再インストール後はAWS設定を入力し本人ログイン → 空のライブラリに復元。復元は正常バックアップ時点までで、未送信写真・以後の整理変更は含まれない。S3欠損画像は読み込みエラーとして表示する。
@@ -51,3 +57,5 @@ AWSリソースはまだ作成していない。AWS CLI / SAM CLIは現在の環
 - 署名なしDebugビルドを既存資産でオフライン署名する場合: PhotoHub.debug.dylib／__preview.dylibなどの内包ライブラリも先に署名し、アプリ全体を最後に署名する。ライブラリを個別に検証し、インストール後はlaunch成功だけでなく後続のprocess一覧で動作継続を確認する。詳細は [実機更新記録](sessions/2026-10-12-ios-folder-deploy.md)。
 
 `.gitignore`で.env、開発データ、Xcode個人設定を除外する。サンプルにも秘密値を記載しない。
+
+MacのS3手動アップロードは「設定 → S3フォルダアップロード」。操作・上限・料金・中断復旧は [手動フォルダアップロード](docs/MANUAL-FOLDER-UPLOAD.md)。元フォルダを保持し、自動同期しない。AWS接続先は確認画面で指定し、送信前に対象と保存先への明示確認が必要。

@@ -145,3 +145,59 @@ final class IntegrationTests: XCTestCase {
         await model.releaseOriginals(); XCTAssertTrue(FileManager.default.fileExists(atPath: original.path)) // development copies are protected
     }
 }
+
+private final class SessionRestoreProtocol: URLProtocol {
+    static var status = 200
+    static var body = Data()
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let response = HTTPURLResponse(url: request.url!, statusCode: Self.status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Self.body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+private final class FixtureRefreshTokens: RefreshTokenStorage {
+    var value: String? = "test-only-refresh"
+    func read(_ configuration: CloudConfiguration) throws -> String {
+        guard let value else { throw StoredSessionError.missing }; return value
+    }
+    func save(_ token: String, configuration: CloudConfiguration) throws { value = token }
+    func delete(_ configuration: CloudConfiguration) { value = nil }
+}
+
+extension IntegrationTests {
+    func testStoredLoginRefreshAndFailurePreserveKeychainUntilLogout() async throws {
+        let session = URLSessionConfiguration.ephemeral
+        session.protocolClasses = [SessionRestoreProtocol.self]
+        let store = FixtureRefreshTokens()
+        let auth = Authentication(network: URLSession(configuration: session), storage: store)
+        var config = CloudConfiguration()
+        config.api = "https://fixture.invalid"
+        config.domain = "https://" + UUID().uuidString + ".invalid"
+        config.clientID = "test-client"
+        config.owner = UUID().uuidString
+        defer { auth.signOut(config) }
+        SessionRestoreProtocol.status = 200
+        SessionRestoreProtocol.body = Data(#"{"access_token":"test-only-access"}"#.utf8)
+        let restored = try await auth.token(config)
+        XCTAssertEqual(restored, "test-only-access")
+        SessionRestoreProtocol.status = 503
+        SessionRestoreProtocol.body = Data(#"{"error":"temporarily_unavailable"}"#.utf8)
+        do { _ = try await auth.token(config); XCTFail("Expected service failure") } catch { }
+        SessionRestoreProtocol.status = 200
+        SessionRestoreProtocol.body = Data(#"{"access_token":"test-only-access"}"#.utf8)
+        let retry = try await auth.token(config)
+        XCTAssertEqual(retry, "test-only-access")
+        SessionRestoreProtocol.status = 400
+        SessionRestoreProtocol.body = Data(#"{"error":"invalid_grant"}"#.utf8)
+        do { _ = try await auth.token(config); XCTFail("Expected expiry") }
+        catch StoredSessionError.expired { }
+        auth.signOut(config)
+        do { _ = try await auth.token(config); XCTFail("Expected logged out session") }
+        catch StoredSessionError.missing { }
+    }
+}

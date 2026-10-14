@@ -2,7 +2,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 if [ "$(uname -s)" != Darwin ]; then
-  echo 'This setup script targets macOS. On Windows use setup-web.ps1.' >&2
+  echo 'The desktop app now supports macOS only.' >&2
   exit 1
 fi
 task_python=${PHOTO_HUB_SETUP_PYTHON:-python3}
@@ -11,8 +11,7 @@ if [ ! -x .venv/bin/python ]; then
   "$task_python" -m venv .venv
 fi
 .venv/bin/python -m pip install -r local-api/requirements.lock.txt
-npm ci --prefix web
-npm ci --prefix desktop
 .venv/bin/python scripts/generate-contracts.py --check
 .venv/bin/python scripts/create-fixtures.py
+sh scripts/build-mac-app.sh
 echo 'Ready. Start with: sh scripts/start-desktop.sh'

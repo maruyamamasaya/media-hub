@@ -1,0 +1,123 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: media-hub owner-only read API for existing private S3
+Parameters:
+  BucketName:
+    Type: String
+  OwnerSub:
+    Type: String
+    AllowedPattern: '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+  UserPoolId:
+    Type: String
+    AllowedPattern: 'ap-northeast-1_[A-Za-z0-9]+'
+  ClientId:
+    Type: String
+    AllowedPattern: '[a-z0-9]+'
+Resources:
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: '$default'
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 5
+        ThrottlingRateLimit: 2
+      RouteSettings:
+        'POST /folder-unlock':
+          ThrottlingBurstLimit: 1
+          ThrottlingRateLimit: 0.2
+      Auth:
+        DefaultAuthorizer: OwnerJWT
+        Authorizers:
+          OwnerJWT:
+            IdentitySource: '$request.header.Authorization'
+            JwtConfiguration:
+              issuer: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPoolId}'
+              audience: [!Ref ClientId]
+  Function:
+    DependsOn: LogGroup
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-reader'
+      Role: !GetAtt ReaderRole.Arn
+      CodeUri: ../backend/
+      Handler: reader.handler
+      Runtime: python3.12
+      Architectures: [arm64]
+      MemorySize: 128
+      Timeout: 15
+      Environment:
+        Variables:
+          BUCKET: !Ref BucketName
+          OWNER_SUB: !Ref OwnerSub
+      Events:
+        FolderUnlock:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /folder-unlock
+            Method: POST
+            Auth:
+              AuthorizationScopes: [openid]
+        Library:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /library
+            Method: GET
+            Auth:
+              AuthorizationScopes: [openid]
+        Catalog:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /catalogs/{root}/{upload}
+            Method: GET
+            Auth:
+              AuthorizationScopes: [openid]
+        Media:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /catalogs/{root}/{upload}/items/{item}/url
+            Method: GET
+            Auth:
+              AuthorizationScopes: [openid]
+  ReaderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadMediaAndWriteOwnLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['s3:ListBucket']
+                Resource: !Sub 'arn:aws:s3:::${BucketName}'
+                Condition:
+                  StringEquals:
+                    s3:prefix: 'media-hub/catalogs/'
+              - Effect: Allow
+                Action: ['s3:GetObject', 's3:GetObjectVersion']
+                Resource:
+                  - !Sub 'arn:aws:s3:::${BucketName}/media-hub/catalogs/*'
+                  - !Sub 'arn:aws:s3:::${BucketName}/media-hub/originals/*'
+                  - !Sub 'arn:aws:s3:::${BucketName}/media-hub/thumbnails/*'
+                  - !Sub 'arn:aws:s3:::${BucketName}/media-hub/folder-locks/settings.json'
+              - Effect: Allow
+                Action: ['logs:CreateLogStream', 'logs:PutLogEvents']
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-reader:*'
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-reader'
+      RetentionInDays: 7
+Outputs:
+  API:
+    Value: !Sub 'https://${Api}.execute-api.${AWS::Region}.amazonaws.com'

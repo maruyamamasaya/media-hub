@@ -1,12 +1,25 @@
 # AWS設定とデプロイ手順
 
 ## 今の状態と承認対象
-AWSリソースは未作成。ユーザーの指定に従い、S3未設定でもローカル開発モードで検証する。本番の認証は無効化しない。
+2026-10-14にユーザーがAWS/S3利用の再開とAWS操作を許可。東京の独立S3スタック `photo-hub-storage` を作成済み。バケット名は `photo-hub-storage-bucket-ajgsbh5jtcvp`。1 KiBの実AWS往復・SHA-256照合・テスト版削除に成功。MacにはAWS CLI v2を確認済み。`photo-hub`プロファイルのブラウザログイン完了。本番の認証は無効化しない。
 
 有料リソース作成前に確認する構成: 東京の非公開S3 Standard×1、Cognito User Poolと公開クライアント×1、HTTP API×1、128MB ARM Lambda×1、保持7日のCloudWatchログ。常時サーバー・NAT・クラウドDB・独自ドメインなし。総量100GBで概算$3–5/月（転送・無料枠・写真増加で変動）、詳細は [DESIGN.md](DESIGN.md)。この構成と費用の承認後に下記デプロイを行う。
 
 ## 前提
-AWSアカウント、東京での作成権限、AWS CLIとSAM CLIを準備する。CLI認証はAWS IAM Identity Center/短期認証を推奨。秘密鍵やパスワードをチャット・Gitに貼らない。
+AWSアカウント、東京での作成権限、AWS CLIとSAM CLIを準備する。CLI認証はAWS IAM Identity Center/短期認証を推奨。Macでは `aws login --profile photo-hub --region ap-northeast-1` でブラウザ認証を開始できる。以降のコマンドは `--profile photo-hub` を付ける。秘密鍵やパスワードをチャット・Gitに貼らない。
+
+## S3接続の確認
+
+バケット作成後、まず読み取り検証を実行する。
+
+```sh
+python3 scripts/check-s3.py --profile photo-hub --bucket YOUR_BUCKET
+python3 scripts/check-s3.py --profile photo-hub --bucket YOUR_BUCKET --write-test
+```
+
+後者は専用のランダムキーへ1 KiBだけ送信し、HEADのサイズ・SHA-256と取得バイト列を確認してテストオブジェクトを削除する。バージョニング有効時は作成した版だけを削除する。ライブラリ原本には触れない。Public Access Blockの4項目が無効なら書き込みを停止する。この確認だけではIAM・バケットポリシー全体の監査やアプリ接続の完了とはしない。SHA-256と条件付きPUTは[AWS公式仕様](https://docs.aws.amazon.com/cli/latest/reference/s3api/put-object.html)を使用。
+
+既存Web/PC素材のリモート転送はPC内の模擬保存のまま。別機能として[Mac手動フォルダアップローダー](MANUAL-FOLDER-UPLOAD.md)を追加済み。実AWS送信検証・iOS読取・既存ライブラリ統合・容量解放は次工程。この接続検証ツールは転送先を変更しない。
 
 ## 1. 認証だけ作成
 まずテンプレートを検証し、承認されたAWSアカウントへデプロイする。DomainPrefixは世界で一意のCognitoドメイン用文字列へ置き換える。
@@ -44,3 +57,15 @@ guidedでstack名photo-hub-service、3パラメータ、IAM作成権限を確認
 
 ## コスト管理と後片付け
 AWS Budgetsで予算通知（例$5/月）を設定する。通知は課金の自動停止ではない。保存量・転送量を実測して見積もりを更新する。バケット・User PoolはRetain指定のため、stack削除でも残る。写真の永続削除やリソース破棄は別途明示的に確認して行う。古い正常JSONとtombstoneは自動削除しない。
+
+## Web・PC用S3スタック
+
+`infrastructure/storage.yaml` はS3だけを作成するCloudFormationテンプレート。既存iOS用 `service.yaml` のバケットとは別で、自動移行・相互接続はない。非公開、AES256暗号化、TLS必須、バージョニング有効、未完了マルチパートを7日で破棄する。原本や旧版の自動削除・Glacier移行は設定しない。旧版も保存容量として課金される。stack削除時はバケットを保持する。
+
+```sh
+aws cloudformation validate-template --template-body file://infrastructure/storage.yaml --profile photo-hub --region ap-northeast-1
+aws cloudformation deploy --template-file infrastructure/storage.yaml --stack-name photo-hub-storage --profile photo-hub --region ap-northeast-1
+aws cloudformation describe-stacks --stack-name photo-hub-storage --profile photo-hub --region ap-northeast-1 --query 'Stacks[0].Outputs'
+```
+
+AWS認証は端末のAWS CLIが管理する。ブラウザ画面やElectron rendererへ秘密鍵を渡さない。アプリ接続時にはバケット・キー範囲に限定した権限を整備する。

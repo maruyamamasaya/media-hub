@@ -1,0 +1,10 @@
+Generated with the built-in image_gen tool on 2026-10-14.
+User approved this result for the Mac app, then requested the same artwork for iPhone on 2026-10-14. iOS reuses this source through an opaque 1024px export; no new image generation.
+Transparent background: true.
+
+Final prompt:
+Use case: stylized-concept
+Asset type: final macOS app icon artwork for a private media library called media-hub, square 1024 x 1024.
+Primary request: an elegant abstract icon, no text, no recognizable camera or folder. A sculptural continuous folded ribbon forming a rounded, slightly asymmetric hollow loop with two overlapping planes, suggesting collected images and a quiet archive through pure geometry. Strong simple silhouette discernible at 16–32 pixels.
+Style: refined contemporary macOS icon, softly dimensional satin glass and ceramic, carefully restrained, sophisticated and calm. Central pale mint / ivory abstract folded form against a deep forest green rounded-square tile with subtly lit emerald edges and very restrained soft shadow. Large central shape, ample breathing room, no tiny details. The tile should occupy about 86% of the square canvas with truly transparent area outside its rounded corners, centered and front-facing, not a perspective mockup. Keep the central negative space clearly open and the geometry bold, not a letter or a corporate symbol.
+Constraints: one icon only, no words, no letters, no logos, no borders outside the tile, no surrounding scene, no grid of variations, no decorative particles, no excessive glow. High quality finished icon ready for a macOS Dock.

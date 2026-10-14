@@ -567,6 +567,305 @@
           "type": "boolean"
         }
       }
+    },
+    "MediaFolder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "parentId",
+        "isLocked"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isLocked": {
+          "type": "boolean"
+        }
+      }
+    },
+    "FolderUploadItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "folderId",
+        "relativePath",
+        "byteSize",
+        "state"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "folderId": {
+          "type": "string"
+        },
+        "relativePath": {
+          "type": "string"
+        },
+        "byteSize": {
+          "type": "integer"
+        },
+        "state": {
+          "type": "string"
+        }
+      }
+    },
+    "FolderUpload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "bucket",
+        "profile",
+        "region",
+        "state",
+        "error",
+        "byteSize",
+        "completed",
+        "skipped",
+        "folders",
+        "items"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "bucket": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "byteSize": {
+          "type": "integer"
+        },
+        "completed": {
+          "type": "integer"
+        },
+        "skipped": {
+          "type": "integer"
+        },
+        "folders": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MediaFolder"
+          }
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FolderUploadItem"
+          }
+        }
+      }
+    },
+    "ReadRoot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "rootId",
+        "name",
+        "itemCount",
+        "byteSize"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "rootId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "itemCount": {
+          "type": "integer"
+        },
+        "byteSize": {
+          "type": "integer"
+        }
+      }
+    },
+    "ReadItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "folderId",
+        "sha256",
+        "mimeType",
+        "byteSize",
+        "hasThumbnail"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "folderId": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "mimeType": {
+          "type": "string"
+        },
+        "byteSize": {
+          "type": "integer"
+        },
+        "hasThumbnail": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ReadCatalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "rootId",
+        "name",
+        "folders",
+        "items"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "rootId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "folders": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MediaFolder"
+          }
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReadItem"
+          }
+        }
+      }
+    },
+    "ReadURL": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "expiresIn"
+      ],
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "expiresIn": {
+          "type": "integer"
+        }
+      }
+    },
+    "LightVideo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "state",
+        "originalBytes",
+        "estimatedBytes",
+        "outputBytes",
+        "durationSeconds",
+        "progress",
+        "error",
+        "warning"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "originalBytes": {
+          "type": "integer"
+        },
+        "estimatedBytes": {
+          "type": "integer"
+        },
+        "outputBytes": {
+          "type": "integer"
+        },
+        "durationSeconds": {
+          "type": "number"
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "error": {
+          "type": "string"
+        },
+        "warning": {
+          "type": "string"
+        }
+      }
+    },
+    "FolderUnlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "token",
+        "expiresIn"
+      ],
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "expiresIn": {
+          "type": "integer"
+        }
+      }
     }
   }
 }

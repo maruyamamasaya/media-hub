@@ -12,17 +12,49 @@ struct CloudConfiguration: Codable {
     var owner = ""
     var valid: Bool { [api, domain].allSatisfy { URL(string: $0)?.scheme == "https" && URL(string: $0)?.host?.isEmpty == false } && !clientID.isEmpty && UUID(uuidString: owner) != nil }
 }
+enum StoredSessionError: Error { case missing, expired }
+
+protocol RefreshTokenStorage {
+    func read(_ configuration: CloudConfiguration) throws -> String
+    func save(_ token: String, configuration: CloudConfiguration) throws
+    func delete(_ configuration: CloudConfiguration)
+}
+struct KeychainRefreshTokens: RefreshTokenStorage {
+    private func query(_ configuration: CloudConfiguration) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "PhotoHub.Cognito", kSecAttrAccount as String: configuration.domain + configuration.clientID]
+    }
+    func read(_ configuration: CloudConfiguration) throws -> String {
+        var values = query(configuration)
+        values[kSecReturnData as String] = true; values[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(values as CFDictionary, &result)
+        if status == errSecItemNotFound { throw StoredSessionError.missing }
+        guard status == errSecSuccess, let data = result as? Data, let token = String(data: data, encoding: .utf8) else { throw HubError.configuration }
+        return token
+    }
+    func save(_ token: String, configuration: CloudConfiguration) throws {
+        let values = query(configuration)
+        let data: [String: Any] = [kSecValueData as String: Data(token.utf8), kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
+        let status = SecItemUpdate(values as CFDictionary, data as CFDictionary)
+        if status == errSecItemNotFound {
+            guard SecItemAdd(values.merging(data) { _, new in new } as CFDictionary, nil) == errSecSuccess else { throw HubError.configuration }
+        } else if status != errSecSuccess { throw HubError.configuration }
+    }
+    func delete(_ configuration: CloudConfiguration) { SecItemDelete(query(configuration) as CFDictionary) }
+}
+
 @MainActor
 final class Authentication: NSObject, ASWebAuthenticationPresentationContextProviding {
     private var session: ASWebAuthenticationSession?
-    private let service = "PhotoHub.Cognito"
+    private let network: URLSession
+    private let storage: any RefreshTokenStorage
+    init(network: URLSession = .shared, storage: any RefreshTokenStorage = KeychainRefreshTokens()) { self.network = network; self.storage = storage; super.init() }
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first(where: \.isKeyWindow) ?? ASPresentationAnchor()
     }
     private func base64(_ data: Data) -> String { data.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "") }
     private func random() throws -> String { var bytes = [UInt8](repeating: 0, count: 32); guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else { throw HubError.configuration }; return base64(Data(bytes)) }
-    private func keychain(_ configuration: CloudConfiguration) -> [String: Any] { [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: configuration.domain + configuration.clientID] }
-    func signOut(_ configuration: CloudConfiguration) { SecItemDelete(keychain(configuration) as CFDictionary) }
+    func signOut(_ configuration: CloudConfiguration) { storage.delete(configuration) }
     func login(_ configuration: CloudConfiguration) async throws {
         guard configuration.valid else { throw HubError.configuration }
         let verifier = try random(), state = try random()
@@ -40,15 +72,11 @@ final class Authentication: NSObject, ASWebAuthenticationPresentationContextProv
         guard values.first(where: { $0.name == "state" })?.value == state, let code = values.first(where: { $0.name == "code" })?.value else { throw HubError.configuration }
         let tokens = try await exchange(configuration, fields: ["grant_type": "authorization_code", "code": code, "code_verifier": verifier, "redirect_uri": "photohub://callback"])
         guard let refresh = tokens["refresh_token"] else { throw HubError.configuration }
-        var query = keychain(configuration); SecItemDelete(query as CFDictionary)
-        query[kSecValueData as String] = Data(refresh.utf8); query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        guard SecItemAdd(query as CFDictionary, nil) == errSecSuccess else { throw HubError.configuration }
+        try storage.save(refresh, configuration: configuration)
     }
     func token(_ configuration: CloudConfiguration) async throws -> String {
         guard configuration.valid else { throw HubError.configuration }
-        var query = keychain(configuration); query[kSecReturnData as String] = true; query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data, let refresh = String(data: data, encoding: .utf8) else { throw HubError.configuration }
+        let refresh = try storage.read(configuration)
         let tokens = try await exchange(configuration, fields: ["grant_type": "refresh_token", "refresh_token": refresh])
         guard let token = tokens["access_token"] else { throw HubError.configuration }; return token
     }
@@ -57,8 +85,13 @@ final class Authentication: NSObject, ASWebAuthenticationPresentationContextProv
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         var form = URLComponents(); form.queryItems = (fields.merging(["client_id": configuration.clientID]) { _, new in new }).map { URLQueryItem(name: $0.key, value: $0.value) }
         request.httpBody = Data((form.percentEncodedQuery ?? "").utf8)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200, let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw HubError.configuration }
+        let (data, response) = try await network.data(for: request)
+        guard let response = response as? HTTPURLResponse,
+              let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw HubError.configuration }
+        if response.statusCode != 200 {
+            if payload["error"] as? String == "invalid_grant" { throw StoredSessionError.expired }
+            throw HubError.configuration
+        }
         return payload.compactMapValues { $0 as? String }
     }
 }

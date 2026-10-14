@@ -10,6 +10,7 @@ Resources:
     DeletionPolicy: Retain
     Properties:
       UserPoolName: photo-hub-owner
+      UserPoolTier: LITE
       AdminCreateUserConfig:
         AllowAdminCreateUserOnly: true
       UsernameAttributes: [email]
@@ -20,7 +21,7 @@ Resources:
             Priority: 1
       Policies:
         PasswordPolicy:
-          MinimumLength: 12
+          MinimumLength: 8
           RequireLowercase: true
           RequireUppercase: true
           RequireNumbers: true

@@ -2,27 +2,43 @@ import os
 import secrets
 import tempfile
 import zipfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request, UploadFile, File, Query
+from fastapi import FastAPI, Request, Response, UploadFile, File, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from .service import Vault, VaultError
+from .folder_upload import FolderUploads
+from .light_video import LightVideos
+from .folder_privacy import FolderPrivacy
 
 ROOT = Path(__file__).resolve().parents[2]
 ALLOWED_ORIGINS = {'http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:8765', 'http://localhost:8765'}
 
 
-def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_origin=None):
+def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_origin=None, cloud_only=False, privacy_enabled=False):
     if (desktop_token is None) != (desktop_origin is None):
         raise ValueError('Desktop token and origin must be supplied together')
     if os.getenv('ASSET_LIBRARY_MODE', 'local') != 'local':
         raise RuntimeError('This API supports loopback local development only')
     vault = Vault(data_root or ROOT / '.local/asset-library', fixtures or ROOT / '.local/fixtures')
-    app = FastAPI(title='Asset Library local API', version='1.0.0')
+    @asynccontextmanager
+    async def lifespan(app):
+        yield
+        light_videos.shutdown()
+
+    app = FastAPI(title='Asset Library local API', version='1.0.0', lifespan=lifespan)
     app.state.vault = vault
+    folder_uploads = FolderUploads(vault.root)
+    app.state.folder_uploads = folder_uploads
+    privacy = FolderPrivacy(folder_uploads)
+    def folder_grant(request):
+        return request.headers.get('x-folder-unlock', '') or request.cookies.get('folder_grant', '')
+    light_videos = LightVideos(vault.root)
+    app.state.light_videos = light_videos
 
     @app.middleware('http')
     async def local_boundary(request, call_next):
@@ -39,6 +55,13 @@ def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_ori
             return JSONResponse({'code': 'forbidden_origin', 'message': 'この画面からのアクセスは許可されていません。'}, status_code=403)
         if request.headers.get('sec-fetch-site') == 'cross-site':
             return JSONResponse({'code': 'forbidden_origin', 'message': '別サイトからのアクセスは許可されていません。'}, status_code=403)
+        if cloud_only and request.url.path.startswith('/api/v1/') and not (
+            request.url.path == '/api/v1/status' or request.url.path.startswith('/api/v1/folder-uploads')
+            or request.url.path.startswith('/api/v1/folder-library')
+            or request.url.path.startswith('/api/v1/light-videos')
+            or request.url.path.startswith('/api/v1/folder-locks')
+        ):
+            return JSONResponse({'code': 'cloud_only', 'message': '原本はS3で管理します。ローカルライブラリ機能は終了しました。'}, status_code=410)
         try:
             length = int(request.headers.get('content-length', '0'))
         except ValueError:
@@ -71,6 +94,107 @@ def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_ori
     @app.get('/api/v1/status')
     def status():
         return vault.status()
+
+    @app.get('/api/v1/folder-uploads')
+    def folder_upload_list(request: Request):
+        return privacy.plans(folder_grant(request)) if privacy_enabled else folder_uploads.list()
+
+    @app.get('/api/v1/light-videos')
+    def light_video_list(request: Request):
+        values = light_videos.list()
+        if not privacy_enabled:
+            return values
+        results = []
+        for value in values:
+            plan_id = light_videos.read(value['id']).get('uploadPlanId')
+            if plan_id:
+                try:
+                    privacy.require_full_plan(plan_id, folder_grant(request))
+                except VaultError as exc:
+                    if exc.code == 'folder_locked':
+                        continue
+                    raise
+            results.append(value)
+        return results
+
+    @app.post('/api/v1/light-videos/inspect')
+    def light_video_inspect(body: dict):
+        return light_videos.inspect(body)
+
+    @app.post('/api/v1/light-videos/{job_id}/start')
+    def light_video_start(job_id: str):
+        return light_videos.start(job_id)
+
+    @app.post('/api/v1/light-videos/{job_id}/cancel')
+    def light_video_cancel(job_id: str):
+        return light_videos.cancel(job_id)
+
+    @app.post('/api/v1/light-videos/{job_id}/prepare-upload')
+    def light_video_prepare_upload(job_id: str, request: Request):
+        plan_id = light_videos.read(job_id).get('uploadPlanId')
+        if privacy_enabled and plan_id:
+            privacy.require_full_plan(plan_id, folder_grant(request))
+        return light_videos.prepare_upload(job_id, folder_uploads)
+
+    @app.get('/api/v1/light-videos/{job_id}/content')
+    def light_video_content(job_id: str, request: Request, download: bool = False):
+        plan_id = light_videos.read(job_id).get('uploadPlanId')
+        if privacy_enabled and plan_id:
+            privacy.require_full_plan(plan_id, folder_grant(request))
+        path, name = light_videos.content(job_id)
+        return FileResponse(path, media_type='video/mp4', filename=name,
+            content_disposition_type='attachment' if download else 'inline', headers={'Cache-Control': 'private, no-store'})
+
+    @app.get('/api/v1/folder-library')
+    def folder_library(request: Request):
+        return privacy.library(folder_grant(request)) if privacy_enabled else folder_uploads.library()
+
+    @app.post('/api/v1/folder-locks/unlock')
+    def folder_unlock(body: dict, request: Request, response: Response):
+        result = privacy.unlock(body, folder_grant(request))
+        response.set_cookie('folder_grant', result['token'], max_age=300, httponly=True, samesite='strict', path='/api/v1')
+        return {'expiresIn': result['expiresIn']}
+
+    @app.post('/api/v1/folder-locks/relock')
+    def folder_relock(response: Response):
+        response.delete_cookie('folder_grant', path='/api/v1')
+        return {'locked': True}
+
+    @app.post('/api/v1/folder-locks/settings')
+    def folder_lock_settings(body: dict, request: Request):
+        return privacy.set(body, folder_grant(request))
+
+    @app.get('/api/v1/folder-library/{plan_id}/items/{item_id}/content')
+    def folder_media(plan_id: str, item_id: str, request: Request, thumbnail: bool = False, download: bool = False):
+        if privacy_enabled:
+            privacy.authorize(plan_id, item_id, folder_grant(request))
+        path, mime, name = folder_uploads.media(plan_id, item_id, thumbnail)
+        return FileResponse(path, media_type=mime, filename=name,
+                            content_disposition_type='attachment' if download else 'inline',
+                            headers={'Cache-Control': 'private, no-store'})
+
+    @app.post('/api/v1/folder-uploads/scan')
+    def folder_upload_scan(body: dict, request: Request):
+        result = folder_uploads.scan(body)
+        if privacy_enabled:
+            privacy.require_full_plan(result['id'], folder_grant(request))
+        return result
+
+    @app.get('/api/v1/folder-uploads/{plan_id}')
+    def folder_upload_status(plan_id: str, request: Request):
+        with folder_uploads.lock:
+            return privacy.plan(plan_id, folder_grant(request)) if privacy_enabled else folder_uploads.public(folder_uploads.read(plan_id))
+
+    @app.post('/api/v1/folder-uploads/{plan_id}/start')
+    def folder_upload_start(plan_id: str, body: dict, request: Request):
+        if privacy_enabled:
+            privacy.require_full_plan(plan_id, folder_grant(request))
+        return folder_uploads.start(plan_id, body)
+
+    @app.post('/api/v1/folder-uploads/{plan_id}/pause')
+    def folder_upload_pause(plan_id: str, request: Request):
+        result = folder_uploads.pause(plan_id)
+        return privacy.plan(plan_id, folder_grant(request)) if privacy_enabled else result
 
     @app.get('/api/v1/filter-options')
     def filter_options():

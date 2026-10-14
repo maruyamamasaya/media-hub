@@ -35,7 +35,7 @@ def main():
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
             origin = f'http://127.0.0.1:{port}'
-            app = create_app(root, config['fixtures'], desktop_token=token, desktop_origin=origin)
+            app = create_app(root, config['fixtures'], desktop_token=token, desktop_origin=origin, cloud_only=True, privacy_enabled=True)
             server = uvicorn.Server(uvicorn.Config(app, access_log=False, log_level='error', timeout_graceful_shutdown=30))
 
             def watch_parent():

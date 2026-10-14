@@ -146,3 +146,83 @@ export interface SyncDirectoryResult {
   limited: boolean;
 }
 
+export interface MediaFolder {
+  id: string;
+  name: string;
+  parentId: string | null;
+  isLocked: boolean;
+}
+
+export interface FolderUploadItem {
+  id: string;
+  name: string;
+  folderId: string;
+  relativePath: string;
+  byteSize: number;
+  state: string;
+}
+
+export interface FolderUpload {
+  id: string;
+  name: string;
+  bucket: string;
+  profile: string;
+  region: string;
+  state: string;
+  error: string;
+  byteSize: number;
+  completed: number;
+  skipped: number;
+  folders: MediaFolder[];
+  items: FolderUploadItem[];
+}
+
+export interface ReadRoot {
+  id: string;
+  rootId: string;
+  name: string;
+  itemCount: number;
+  byteSize: number;
+}
+
+export interface ReadItem {
+  id: string;
+  name: string;
+  folderId: string;
+  sha256: string;
+  mimeType: string;
+  byteSize: number;
+  hasThumbnail: boolean;
+}
+
+export interface ReadCatalog {
+  id: string;
+  rootId: string;
+  name: string;
+  folders: MediaFolder[];
+  items: ReadItem[];
+}
+
+export interface ReadURL {
+  url: string;
+  expiresIn: number;
+}
+
+export interface LightVideo {
+  id: string;
+  name: string;
+  state: string;
+  originalBytes: number;
+  estimatedBytes: number;
+  outputBytes: number;
+  durationSeconds: number;
+  progress: number;
+  error: string;
+  warning: string;
+}
+
+export interface FolderUnlock {
+  token: string;
+  expiresIn: number;
+}
+

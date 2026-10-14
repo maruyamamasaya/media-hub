@@ -54,15 +54,14 @@ else {
       const startedAt = Date.now();
       ipcMain.handle('choose-storage-directory', async event => {
         if (!window || event.sender !== window.webContents || new URL(event.sender.getURL()).origin !== origin) throw new Error('Invalid sender');
-        const result = await dialog.showOpenDialog(window, { title: '同期する画像フォルダ', properties: ['openDirectory'] });
+        const result = await dialog.showOpenDialog(window, { title: 'メディアフォルダを選択', properties: ['openDirectory'] });
         return result.canceled ? null : result.filePaths[0];
       });
-      if (smoke) {
-        const body = new FormData();
-        body.append('files', new Blob([fs.readFileSync(path.join(root, '.local/fixtures/sample-0001.png'))], { type: 'image/png' }), 'sample-0001.png');
-        const imported = await fetch(`${origin}/api/v1/imports`, { method: 'POST', headers: { 'X-Photo-Hub-Token': token }, body });
-        if (!imported.ok) throw new Error('試験素材の追加に失敗しました。');
-      }
+      ipcMain.handle('choose-light-video', async event => {
+        if (!window || event.sender !== window.webContents || new URL(event.sender.getURL()).origin !== origin) throw new Error('Invalid sender');
+        const result = await dialog.showOpenDialog(window, { title: '軽量版を作る動画を選択', properties: ['openFile'], filters: [{ name: '動画', extensions: ['mov', 'mp4', 'm4v', 'mkv', 'webm'] }] });
+        return result.canceled ? null : result.filePaths[0];
+      });
       const isolated = session.fromPartition('photo-hub-desktop');
       isolated.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
       isolated.setPermissionCheckHandler(() => false);
@@ -99,14 +98,13 @@ else {
         const ready = await window.webContents.executeJavaScript(`new Promise((resolve, reject) => {
           let attempts = 0;
           const timer = setInterval(() => {
-            const image = document.querySelector('.asset-grid img');
-            if (!document.querySelector('.spinner') && image && image.complete && image.naturalWidth > 0) { clearInterval(timer); resolve(document.body.innerText); }
+            const shell = document.querySelector('.cloud-app');
+            if (shell && document.body.innerText.includes('保存済みフォルダ')) { clearInterval(timer); resolve(document.body.innerText); }
             else if (document.querySelector('.error-box')) { clearInterval(timer); reject(new Error('UI API request failed')); }
             else if (++attempts > 100) { clearInterval(timer); reject(new Error('UI readiness timeout')); }
           }, 100);
         })`);
-        if (!ready.includes('素材')) throw new Error('共有UIを確認できませんでした。');
-        if (!ready.includes('ローカル') && !ready.includes('開発用リモート')) throw new Error('原本の所在表示を確認できませんでした。');
+        if (!ready.includes('S3フォルダ') || !ready.includes('アップロード')) throw new Error('S3専用UIを確認できませんでした。');
         const output = path.join(root, '.local/desktop-smoke.png');
         fs.writeFileSync(output, (await window.webContents.capturePage()).toPNG());
         fs.writeFileSync(path.join(root, '.local/desktop-smoke-metrics.json'), JSON.stringify({ totalSmokeMs: Date.now() - launchedAt, uiReadyMsAfterApi: Date.now() - startedAt, secondarySeen, processes: app.getAppMetrics().map(({ type, memory }) => ({ type, memory })) }, null, 2));

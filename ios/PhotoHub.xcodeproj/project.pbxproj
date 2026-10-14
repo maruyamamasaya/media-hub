@@ -16,6 +16,8 @@
 		6B245EF58EAB12FF15030C86 /* PhotoImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 772D0B08D527B7FA0FE8118B /* PhotoImporter.swift */; };
 		6B31A9BA40CA75006CDE1F23 /* Cloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1019FCA07D6E5086FE2DCA71 /* Cloud.swift */; };
 		ACBD4CEFDE1D3B7859F48AD5 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = EEB2C62CDFF2B03DA2B9A4FC /* Assets.xcassets */; };
+		BA9851BE459C3FCBC6BD29E1 /* AssetLibraryContract in Frameworks */ = {isa = PBXBuildFile; productRef = A98EE51CC04084BFF4D02BC6 /* AssetLibraryContract */; };
+		C7AE067472F93802C99DCBA5 /* CloudViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B54F568961EACDDC715F383 /* CloudViewer.swift */; };
 		E4F03A13F1E5BFB641FDC876 /* PhotoHubCore in Frameworks */ = {isa = PBXBuildFile; productRef = 7C7901E98F8676FF62E8F68D /* PhotoHubCore */; };
 /* End PBXBuildFile section */
 
@@ -32,12 +34,13 @@
 /* Begin PBXFileReference section */
 		0E6150EC18B810B04C79BA3C /* Views.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views.swift; sourceTree = "<group>"; };
 		1019FCA07D6E5086FE2DCA71 /* Cloud.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Cloud.swift; sourceTree = "<group>"; };
-		320128F615D57934021C0A83 /* photo-hub */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "photo-hub"; path = ..; sourceTree = SOURCE_ROOT; };
 		33312C4AD601CF10ED759337 /* PhotoHubApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoHubApp.swift; sourceTree = "<group>"; };
 		35397868F41384409B36AE61 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		51D2B2DDFD833643DC1702B5 /* IntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntegrationTests.swift; sourceTree = "<group>"; };
+		6B54F568961EACDDC715F383 /* CloudViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudViewer.swift; sourceTree = "<group>"; };
 		764BC9FF31567E8DACB4C584 /* LibraryModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryModel.swift; sourceTree = "<group>"; };
 		772D0B08D527B7FA0FE8118B /* PhotoImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoImporter.swift; sourceTree = "<group>"; };
+		A60646B7C8283DFC92E60B62 /* media-hub */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "media-hub"; path = ..; sourceTree = SOURCE_ROOT; };
 		B3B07C5D7EABE513442D2393 /* PhotoHub.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PhotoHub.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B56F256A35BDF1735AB4A8BD /* PhotoHubTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PhotoHubTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D97661A47B38FC01E71AACD5 /* FolderSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderSync.swift; sourceTree = "<group>"; };
@@ -50,6 +53,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				09623195C3C640AA01BA5258 /* PhotoHubCore in Frameworks */,
+				BA9851BE459C3FCBC6BD29E1 /* AssetLibraryContract in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -69,6 +73,7 @@
 			children = (
 				EEB2C62CDFF2B03DA2B9A4FC /* Assets.xcassets */,
 				1019FCA07D6E5086FE2DCA71 /* Cloud.swift */,
+				6B54F568961EACDDC715F383 /* CloudViewer.swift */,
 				D97661A47B38FC01E71AACD5 /* FolderSync.swift */,
 				35397868F41384409B36AE61 /* Info.plist */,
 				764BC9FF31567E8DACB4C584 /* LibraryModel.swift */,
@@ -82,7 +87,7 @@
 		68A5C3FC61555ACC147C3A4E /* Packages */ = {
 			isa = PBXGroup;
 			children = (
-				320128F615D57934021C0A83 /* photo-hub */,
+				A60646B7C8283DFC92E60B62 /* media-hub */,
 			);
 			name = Packages;
 			sourceTree = "<group>";
@@ -132,6 +137,7 @@
 			name = PhotoHub;
 			packageProductDependencies = (
 				1768C11DE422A8D71300AADC /* PhotoHubCore */,
+				A98EE51CC04084BFF4D02BC6 /* AssetLibraryContract */,
 			);
 			productName = PhotoHub;
 			productReference = B3B07C5D7EABE513442D2393 /* PhotoHub.app */;
@@ -208,6 +214,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				6B31A9BA40CA75006CDE1F23 /* Cloud.swift in Sources */,
+				C7AE067472F93802C99DCBA5 /* CloudViewer.swift in Sources */,
 				312B4188F8EB0C35EBC50526 /* FolderSync.swift in Sources */,
 				3FFCE5327E1DDCD5A5CEFF49 /* LibraryModel.swift in Sources */,
 				59A5A0D0143F66D08174C798 /* PhotoHubApp.swift in Sources */,
@@ -242,9 +249,7 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = PhotoHub/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Photo Hub";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "ダウンロードした原本を写真ライブラリに保存します。";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "選択した写真の原本と撮影日時を取り込むために使用します。";
+				INFOPLIST_KEY_CFBundleDisplayName = "media-hub";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -344,9 +349,7 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = PhotoHub/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Photo Hub";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "ダウンロードした原本を写真ライブラリに保存します。";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "選択した写真の原本と撮影日時を取り込むために使用します。";
+				INFOPLIST_KEY_CFBundleDisplayName = "media-hub";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -479,6 +482,10 @@
 		7C7901E98F8676FF62E8F68D /* PhotoHubCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = PhotoHubCore;
+		};
+		A98EE51CC04084BFF4D02BC6 /* AssetLibraryContract */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = AssetLibraryContract;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

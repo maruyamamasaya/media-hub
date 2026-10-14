@@ -18,14 +18,14 @@ targets:
     sources: [PhotoHub]
     dependencies:
       - package: PhotoHubCore
+      - package: PhotoHubCore
+        product: AssetLibraryContract
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: personal.photohub
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: Photo Hub
-        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: 選択した写真の原本と撮影日時を取り込むために使用します。
-        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: ダウンロードした原本を写真ライブラリに保存します。
+        INFOPLIST_KEY_CFBundleDisplayName: media-hub
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
     info:
       path: PhotoHub/Info.plist

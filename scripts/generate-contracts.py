@@ -13,7 +13,7 @@ def type_name(prop, swift=False):
     value = prop['type']
     nullable = isinstance(value, list)
     kind = next(x for x in value if x != 'null') if nullable else value
-    types = {'string': 'String', 'integer': 'Int64', 'boolean': 'Bool'} if swift else {'string': 'string', 'integer': 'number', 'boolean': 'boolean'}
+    types = {'string': 'String', 'number': 'Double', 'integer': 'Int64', 'boolean': 'Bool'} if swift else {'string': 'string', 'number': 'number', 'integer': 'number', 'boolean': 'boolean'}
     result = f'[{type_name(prop["items"], True)}]' if swift and kind == 'array' else f'{type_name(prop["items"])}[]' if kind == 'array' else types[kind]
     return result + ('?' if swift else ' | null') if nullable else result
 

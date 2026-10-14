@@ -3,7 +3,9 @@
 | Feature | Primary paths | Search keywords / Key entry points | Related tests |
 | --- | --- | --- | --- |
 | Web画面 | `web/src/App.tsx`, `AssetDetail.tsx`, `Modal.tsx`, `api.ts` | `App`, `upload`, `retryImports`, `AssetDetail`, `fileUrl` | Web build、ブラウザ一連操作 |
-| Mac・Windowsアプリ試作 | `desktop/main.cjs`, `preload.cjs`, `api-process.cjs`, `platform.cjs`, `local-api/desktop_run.py` | `startApi`, `pythonExecutable`, `menuTemplate`, `activate`, `desktop_token`, `watch_parent` | `desktop/api-process.test.cjs`, `platform.test.cjs`, `local-api/tests/test_desktop.py`, `scripts/verify-desktop.ps1` / `verify-desktop.sh` |
+| Mac SwiftUI | `macos/MediaHubMac/App.swift`, `Runtime.swift`, `Model.swift`, `Views.swift`, `Gallery.swift` | `MacRuntime`, `MacModel`, `MediaHubMacApp`, `relock`, `SquareTile`, `MediaGallery` | `Tests/MediaHubMacTests/RuntimeTests.swift`, `scripts/verify-desktop.sh` |
+| Macアプリアイコン | `macos/Assets/AppIcon.png`, `AppIcon.icns`, `scripts/build-mac-icon.sh`, `build-mac-app.sh` | `CFBundleIconFile`, `iconutil` | ICNSサイズ・透過・同梱照合、署名、Finder実表示 |
+| 旧Electron試作（Windows対応終了） | `desktop/main.cjs`, `preload.cjs`, `api-process.cjs`, `platform.cjs`, `local-api/desktop_run.py` | `startApi`, `pythonExecutable`, `menuTemplate`, `activate`, `desktop_token`, `watch_parent` | `desktop/api-process.test.cjs`, `platform.test.cjs`, `local-api/tests/test_desktop.py`, `scripts/verify-desktop.ps1` / `verify-desktop.sh` |
 | ローカル素材API | `local-api/vault/app.py`, `service.py`, `repository.py`, `storage.py` | `create_app`, `Vault`, `process_item`, `recover`, `list_assets`, `require_revision` | `local-api/tests/test_vault.py` |
 | 原本の所在・ローカル参照 | `local-api/vault/service.py`, `repository.py`, `web/src/App.tsx`, `AssetDetail.tsx`, `scripts/create-local-storage-demo.py` | `storageLocation`, `originalOwnership`, `sync_directory`, `storage_roots`, `transfer_original`, `referenceKey` | `test_existing_original_migrates_*`, `test_local_directory_reference_*` |
 | 通常・アーカイブ | `web/src/ArchiveDialog.tsx`, `AssetDetail.tsx`, `local-api/vault/service.py`, `repository.py` | `archivedAt`, `bulk_archive`, `archive_collection`, `collection_archive_snapshot` | `test_archive_*`, `test_bulk_archive_*`, `test_collection_archive_*`, `test_v2_archive_migration_*` |
@@ -19,6 +21,13 @@
 | ローカル保存・キャッシュ | `Sources/PhotoHubCore/ObjectStore.swift`, `LibraryModel.swift` | `LocalObjectStore`, `DevelopmentObjects`, `DiskCache`, `trim`, `image` | `CoreTests`, `IntegrationTests` |
 | 整理・削除・原本保存 | `LibraryModel.swift`, `Views.swift` | `toggleMembership`, `setFavorite`, `requestDelete`, `finishDelete`, `saveOriginal` | `IntegrationTests`, `CoreTests` |
 | JSONバックアップ・復元 | `Models.swift`, `Repository.swift`, `LibraryModel.swift` | `Backup.validate`, `snapshot`, `restore`, `schemaVersion`, `latest.json` | `CoreTests`, `IntegrationTests` |
+| フォルダ別パスワード・非表示 | `backend/folder_security.py`, `local-api/vault/folder_privacy.py`, `web/src/CloudFolders.tsx`, `ios/PhotoHub/CloudViewer.swift` | `visible`, `grants`, `folder-unlock`, `relock`, `revision` | `backend/tests/test_folder_security.py`, `test_reader.py`, `local-api/tests/test_folder_privacy.py` |
+| iPhone閲覧・本人GET API | `ios/PhotoHub/CloudViewer.swift`, `backend/reader.py`, `infrastructure/reader.yaml` | `CloudViewerRoot`, `CloudViewerModel`, `/library`, `/catalogs` | `backend/tests/test_reader.py`、iOSビルド |
+| S3フォルダ閲覧 | `web/src/CloudFolders.tsx`, `local-api/vault/folder_upload.py` | `library`, `media`, `/folder-library` | `CloudLibraryTests` |
+| Mac手動フォルダアップロード | `local-api/vault/folder_upload.py`, `web/src/FolderUploader.tsx` | `FolderUploads`, `/folder-uploads`, `scan`, `start`, `pause` | `local-api/tests/test_folder_upload.py` |
+| Mac軽量動画の手動作成 | `web/src/LightVideoMaker.tsx`, `local-api/vault/light_video.py`, `desktop/preload.cjs` | `LightVideos`, `prepare_upload`, `chooseVideo`, `/light-videos` | `local-api/tests/test_light_video.py` |
+| 動画容量・転送比較 | `scripts/audit-video-storage.py`, `docs/VIDEO-DELIVERY.md` | `survey`, `estimate`, `ffprobe` | `scripts/tests/test_video_audit.py` |
+| S3実接続確認 | `scripts/check-s3.py`, `infrastructure/storage.yaml` | `check`, `photo-hub-storage`, `--write-test` | `scripts/tests/test_check_s3.py`、実AWS 1 KiB往復 |
 | デプロイ | `infrastructure/auth.yaml`, `service.yaml` | `OwnerJWT`, `OwnerSub`, `BlockPublicAccess`, `BucketPolicy` | YAML構文、SAM/実AWSは未実施 |
 | 検証入口 | `scripts/verify.sh`, `verify.py` | `--fast`, `REQUIRED`, `local_links` | 文書verifyの異常系確認 |
 

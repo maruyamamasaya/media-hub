@@ -358,3 +358,190 @@ public struct SyncDirectoryResult: Codable, Sendable {
     }
 }
 
+public struct MediaFolder: Codable, Sendable {
+    public let id: String
+    public let name: String
+    public let parentId: String?
+    public let isLocked: Bool
+    private enum CodingKeys: String, CodingKey {
+        case id, name, parentId, isLocked
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        if let value = parentId { try container.encode(value, forKey: .parentId) } else { try container.encodeNil(forKey: .parentId) }
+        try container.encode(isLocked, forKey: .isLocked)
+    }
+}
+
+public struct FolderUploadItem: Codable, Sendable {
+    public let id: String
+    public let name: String
+    public let folderId: String
+    public let relativePath: String
+    public let byteSize: Int64
+    public let state: String
+    private enum CodingKeys: String, CodingKey {
+        case id, name, folderId, relativePath, byteSize, state
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(folderId, forKey: .folderId)
+        try container.encode(relativePath, forKey: .relativePath)
+        try container.encode(byteSize, forKey: .byteSize)
+        try container.encode(state, forKey: .state)
+    }
+}
+
+public struct FolderUpload: Codable, Sendable {
+    public let id: String
+    public let name: String
+    public let bucket: String
+    public let profile: String
+    public let region: String
+    public let state: String
+    public let error: String
+    public let byteSize: Int64
+    public let completed: Int64
+    public let skipped: Int64
+    public let folders: [MediaFolder]
+    public let items: [FolderUploadItem]
+    private enum CodingKeys: String, CodingKey {
+        case id, name, bucket, profile, region, state, error, byteSize, completed, skipped, folders, items
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(bucket, forKey: .bucket)
+        try container.encode(profile, forKey: .profile)
+        try container.encode(region, forKey: .region)
+        try container.encode(state, forKey: .state)
+        try container.encode(error, forKey: .error)
+        try container.encode(byteSize, forKey: .byteSize)
+        try container.encode(completed, forKey: .completed)
+        try container.encode(skipped, forKey: .skipped)
+        try container.encode(folders, forKey: .folders)
+        try container.encode(items, forKey: .items)
+    }
+}
+
+public struct ReadRoot: Codable, Sendable {
+    public let id: String
+    public let rootId: String
+    public let name: String
+    public let itemCount: Int64
+    public let byteSize: Int64
+    private enum CodingKeys: String, CodingKey {
+        case id, rootId, name, itemCount, byteSize
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(rootId, forKey: .rootId)
+        try container.encode(name, forKey: .name)
+        try container.encode(itemCount, forKey: .itemCount)
+        try container.encode(byteSize, forKey: .byteSize)
+    }
+}
+
+public struct ReadItem: Codable, Sendable {
+    public let id: String
+    public let name: String
+    public let folderId: String
+    public let sha256: String
+    public let mimeType: String
+    public let byteSize: Int64
+    public let hasThumbnail: Bool
+    private enum CodingKeys: String, CodingKey {
+        case id, name, folderId, sha256, mimeType, byteSize, hasThumbnail
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(folderId, forKey: .folderId)
+        try container.encode(sha256, forKey: .sha256)
+        try container.encode(mimeType, forKey: .mimeType)
+        try container.encode(byteSize, forKey: .byteSize)
+        try container.encode(hasThumbnail, forKey: .hasThumbnail)
+    }
+}
+
+public struct ReadCatalog: Codable, Sendable {
+    public let id: String
+    public let rootId: String
+    public let name: String
+    public let folders: [MediaFolder]
+    public let items: [ReadItem]
+    private enum CodingKeys: String, CodingKey {
+        case id, rootId, name, folders, items
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(rootId, forKey: .rootId)
+        try container.encode(name, forKey: .name)
+        try container.encode(folders, forKey: .folders)
+        try container.encode(items, forKey: .items)
+    }
+}
+
+public struct ReadURL: Codable, Sendable {
+    public let url: String
+    public let expiresIn: Int64
+    private enum CodingKeys: String, CodingKey {
+        case url, expiresIn
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(url, forKey: .url)
+        try container.encode(expiresIn, forKey: .expiresIn)
+    }
+}
+
+public struct LightVideo: Codable, Sendable {
+    public let id: String
+    public let name: String
+    public let state: String
+    public let originalBytes: Int64
+    public let estimatedBytes: Int64
+    public let outputBytes: Int64
+    public let durationSeconds: Double
+    public let progress: Int64
+    public let error: String
+    public let warning: String
+    private enum CodingKeys: String, CodingKey {
+        case id, name, state, originalBytes, estimatedBytes, outputBytes, durationSeconds, progress, error, warning
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(state, forKey: .state)
+        try container.encode(originalBytes, forKey: .originalBytes)
+        try container.encode(estimatedBytes, forKey: .estimatedBytes)
+        try container.encode(outputBytes, forKey: .outputBytes)
+        try container.encode(durationSeconds, forKey: .durationSeconds)
+        try container.encode(progress, forKey: .progress)
+        try container.encode(error, forKey: .error)
+        try container.encode(warning, forKey: .warning)
+    }
+}
+
+public struct FolderUnlock: Codable, Sendable {
+    public let token: String
+    public let expiresIn: Int64
+    private enum CodingKeys: String, CodingKey {
+        case token, expiresIn
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(token, forKey: .token)
+        try container.encode(expiresIn, forKey: .expiresIn)
+    }
+}
+

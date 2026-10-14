@@ -40,3 +40,9 @@ GET /storage-rootsはStorageRoot配列。stateはready/missing。POST /sync-dire
 POST /assets/{id}/transferはTransferRequest（revision、destination local/development-remote、removeLocal bool）を受けAssetを返す。localではremoveLocal=false、development-remoteではtrueを必須とする。ごみ箱は400、revision／変更競合は409。remoteAvailableは対応するリモートコピーの登録有無、localCleanupPendingは転送成功後のローカル整理残り。再試行は最新revisionで同じremote転送を要求。転送・ダウンロード先は照合し、原本を保持し、ローカル転送時はarchivedAtを解除する。S3には接続しない。
 
 SQLite v7: ローカルの既存archivedAtを解除しrevisionを更新する。個別・選択アーカイブにローカルが含まれる場合は400で全件拒否。コレクションsummaryとtokenはリモート素材のみを対象とする。
+
+Mac手動アップロード: `MediaFolder`・`FolderUploadItem`・`FolderUpload`はフォルダ親子関係と転送の公開DTO。`GET /folder-uploads`、`POST /folder-uploads/scan`、`GET /folder-uploads/{id}`、`POST /folder-uploads/{id}/start`（confirmUpload=true必須）、`POST /folder-uploads/{id}/pause`。既存Asset DTOと独立。詳細は [仕様](../docs/MANUAL-FOLDER-UPLOAD.md)。
+
+S3フォルダ閲覧: `GET /folder-library`はroot単位の最新保存完了FolderUpload一覧。`GET /folder-library/{planId}/items/{itemId}/content`は照合した原本（thumbnail=trueでMac原本由来の派生、download=trueで添付）。未完了カタログの原本は取得不可。
+
+本人専用クラウド読取: ReadRoot/ReadCatalog/ReadItem/ReadURLが `/library` と `/catalogs/{root}/{upload}`、登録item用GET URLのDTO。署名URLはカタログに含めず、明示取得時の短いレスポンスだけに含む。iOSには書き込みAPIがない。

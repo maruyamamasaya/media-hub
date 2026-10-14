@@ -5,10 +5,12 @@
 
 SQLite・キー・バックアップ・転送・キャッシュはSwift Packageのユニットテスト。署名APIはPythonのmock S3テスト。iOS統合テストは実際のPNG生成・派生生成・保存・復元・削除をローカルオブジェクト保存で確認する。AWS結合と実機特有の挙動は [DEVICE-CHECKLIST.md](docs/DEVICE-CHECKLIST.md)。
 
-## Web / Windows Validation
-Windowsアプリ試作は `./scripts/verify-desktop.ps1`。共通Web検証に加え、JS構文、Python子プロセス管理・原本照合・再起動・クラッシュ検出、Electronの画像描画と二重起動抑止を確認する。詳細と未確認操作は [デスクトップ運用](docs/DESKTOP-OPERATIONS.md)。
+## Mac SwiftUI / Web Validation
+現行Mac版は `sh scripts/verify-desktop.sh`。契約・文書・ローカルAPI・backend・Swift全テスト・開発用.appビルドを確認する。SwiftのRuntimeTestsは一時領域で認証拒否、同じ領域の二重起動拒否、終了・再起動を実子プロセスで検証し、AWSへアクセスしない。loopback bindが可能な実行環境が必要。
 
-Mac試作は `sh scripts/verify-desktop.sh`（Mac実行は未確認）。OS分岐のNodeテストはWindowsでも実行できる。MacのCmd+W→Dock再表示、Cmd+Q→API停止、Retina・VoiceOverは同文書の実機チェックリストに従う。
+Macのタイル変更では、容量非表示・タイトル10pt・正方形、ファイルクリック、左右ボタンと矢印キー、先頭/末尾、連続移動、Escで一覧復帰を確認。閲覧済み原本だけからの小画像生成・透過保持・破損キャッシュ拒否はCloudLibraryTestsで検証する。
+
+Mac画面・操作・配布の未確認項目は [Mac SwiftUI](docs/MAC-SWIFTUI.md)。Windowsアプリ対応は終了し、Electron検証は旧試作用。以下のWeb検証は開発用として保持。
 
 準備後、ルートで `./scripts/verify-web.ps1`。共通型生成一致・文書full・ローカルAPI全テスト・既存署名APIテスト・Web型チェック/ビルド・差分の空白を確認する。Swift/iOSを含まない。
 
@@ -62,3 +64,17 @@ SwiftLint、独立したSwift format/typecheckコマンド、CI/CD、継続実�
 
 ## 文書Verify自体の限界
 必須文書・必要項目・README導線・ローカルリンク先・文書の行数を確認する。外部URLの到達性、アンカー、文章とコードの意味的一致は判定しない。詳細を分割する時は役割ごとの正本へリンクする。
+
+S3接続ツールの隔離テスト: `python3 -m unittest discover -s scripts/tests -v`。実接続は [AWS設定](docs/AWS-SETUP.md) の読み取り／1 KiB往復確認を行う。アプリ経由のAWS結合検証は別途必要。
+
+手動フォルダアップロードは `local-api/tests/test_folder_upload.py`。模擬S3で階層・空フォルダ・原本変更・中断・再送抑止・照合・管理JSON確定を検証。ブラウザで確認→親子階層→空フォルダ→手動開始の承認境界を確認。実AWS送信は対象を明示して承認後に追加する。
+
+閲覧専用変更は `backend/tests/test_reader.py`（本人制限・GET限定・キー形状・カタログ所属・版固定・署名300秒・ログ秘匿）、CloudOnlyAPITests（旧ローカル操作410）を検証。CloudViewerRootのSimulatorビルドと本人認証・S3フォルダ・動画URL更新は実AWSデプロイ／実機ログイン後に検証する。
+
+軽量動画は `local-api/tests/test_light_video.py` で原本変更拒否・HDR拒否・重複作成抑止・中断復旧・失敗時原本保持・キャンセル・Range再生・契約を確認する。隔離環境の承認済み30秒サンプルで実ffmpeg作成・原本ハッシュ・1080p/60fps・画面からの作成と再生を確認。
+
+軽量版のS3送信は模擬S3で準備段階のクラウドアクセスなし・対象1ファイル・明示送信確認・照合・カタログ名・重複送信計画再利用を検証する。実AWSメディア送信は対象と保存先を確認して本人の送信操作後に確認する。
+
+フォルダロック: backend/tests/test_folder_security.py・test_reader.py、local-api/tests/test_folder_privacy.py。親子継承、名前／件数／派生／URL非表示、owner・期限・revisionのトークン制限、共有設定不正時拒否、条件付き保存、原本非変更、HttpOnly cookie再ロックを確認。模擬S3の既存テストパスワードで画面の解除・期限後再ロックを確認。新しい本人パスワードの設定・確定と実iPhone解除は本人が実施する。
+
+本人ログイン継続: iOS IntegrationTestsの `testStoredLoginRefreshAndFailurePreserveKeychainUntilLogout` は模擬保存領域・URLProtocolでtoken復帰、一時失敗後の再試行、期限切れ分類、明示ログアウトを検証。署名なしSimulatorの実Keychain操作はerrSecMissingEntitlementで実行不可。実機Keychain継承と再起動時の自動復帰は本人端末で確認する。

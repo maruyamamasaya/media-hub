@@ -36,7 +36,7 @@ def validate_contract(value, definition):
                 return
             kind = next(k for k in kind if k != 'null')
         mapping = {'string': str, 'integer': int, 'boolean': bool, 'object': dict, 'array': list}
-        assert type(v) is mapping[kind], (v, kind)
+        assert (type(v) in (int, float) if kind == 'number' else type(v) is mapping[kind]), (v, kind)
         if kind == 'object':
             assert set(model['required']) <= set(v)
             assert set(v) <= set(model['properties'])

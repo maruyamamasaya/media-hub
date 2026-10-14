@@ -1,5 +1,7 @@
 # Mac・Windowsアプリ設計
 
+> 2026-10-14: 通常Mac版はSwiftUIへ移行、Windows対応は終了。現行手順は [Mac SwiftUI](MAC-SWIFTUI.md)。以下は旧Electron試作の記録。
+
 確認日: 2026-10-07。設計案。Windowsの開発用シェル・API起動管理を試作済み。Mac向けPythonパス・メニュー・ウィンドウ再表示・起動スクリプトも追加。[現在の起動と検証](DESKTOP-OPERATIONS.md)。Mac実機は未検証、配布物は未実装。
 
 ## 現状から引き継ぐもの
