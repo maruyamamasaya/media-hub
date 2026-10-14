@@ -1,18 +1,25 @@
 import AppKit
 import AssetLibraryContract
 import SwiftUI
+import PhotoHubCore
 
 @MainActor
 final class MacModel: ObservableObject {
     let runtime: MacRuntime
     @Published var library: [FolderUpload] = []
+    @Published var trash: [CloudTrashEntry] = []
     @Published var uploads: [FolderUpload] = []
+    @Published var encryptedUploads: [FolderUpload] = []
+    @Published var encryptionReady = false
     @Published var videos: [LightVideo] = []
     @Published var error = ""
     @Published var notice = ""
+    @Published var showAWSLogin = false
+    @Published private(set) var awsLoginRequired = false
     @Published private(set) var hasFolderUnlock = false
     @Published var busy = false
     @Published var privacyID = UUID()
+    @Published var hiddenPagesOpen = false
     @Published var concealed = false
     @Published var bucket = "photo-hub-storage-bucket-ajgsbh5jtcvp"
     @Published var profile = "photo-hub"
@@ -20,40 +27,78 @@ final class MacModel: ObservableObject {
     private var needsRefresh = true
     private var loadedDestination = false
     private var unlockTimer: Task<Void, Never>?
-    init(runtime: MacRuntime) { self.runtime = runtime }
+    init(runtime: MacRuntime) { self.runtime = runtime; encryptionReady = (try? MediaSecretStore.load()) != nil }
     func run(_ work: () async throws -> Void) async {
         guard !busy else { return }
         busy = true; error = ""
         let identity = privacyID
         defer { busy = false }
-        do { try await work() } catch is CancellationError {} catch { if identity == privacyID { self.error = error.localizedDescription } }
+        do { try await work() } catch is CancellationError {} catch { if identity == privacyID { handle(error) } }
+    }
+    func handle(_ failure: Error) {
+        error = failure.localizedDescription
+        if case MacAPIError.awsLoginRequired = failure {
+            if !awsLoginRequired { showAWSLogin = true }
+            awsLoginRequired = true
+        }
+    }
+    static func shellQuote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+    var loginCommand: String { "aws login --profile \(Self.shellQuote(profile)) --region \(Self.shellQuote(region))" }
+    func openAWSLogin() {
+        do {
+            let file = FileManager.default.temporaryDirectory.appendingPathComponent("media-hub-login-\(UUID().uuidString).command")
+            let script = "#!/bin/sh\nexport PATH=/opt/homebrew/bin:/usr/local/bin:$PATH\n\(loginCommand)\nprintf '\\nログイン後、Media Hubに戻り「接続を確認」を押してください。\\n'\nrm -- \(Self.shellQuote(file.path))\n"
+            try script.write(to: file, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: file.path)
+            guard NSWorkspace.shared.open(file) else { throw MacAPIError.message("ターミナルを開けません。設定画面のログインコマンドを実行してください。") }
+        } catch { self.error = error.localizedDescription }
+    }
+    func checkAWSLogin() async {
+        guard !busy else { return }
+        awsLoginRequired = false
+        await run { try await refresh() }
     }
     func refresh() async throws {
         let identity = privacyID
         let newUploads: [FolderUpload] = try await runtime.request("/folder-uploads")
-        let newLibrary: [FolderUpload] = try await runtime.request("/folder-library")
-        let newVideos: [LightVideo] = try await runtime.request("/light-videos")
-        guard identity == privacyID, !concealed else { return }
-        uploads = newUploads; library = newLibrary; videos = newVideos
-        needsRefresh = false
         if !loadedDestination, let plan = newUploads.first {
             bucket = plan.bucket; profile = plan.profile; region = plan.region; loadedDestination = true
         }
+        let newLibrary: [FolderUpload] = try await runtime.request("/folder-library")
+        let newEncrypted: [FolderUpload] = try await runtime.request("/encrypted-uploads")
+        let newTrash: [CloudTrashEntry] = try await runtime.request("/folder-library/trash")
+        let newVideos: [LightVideo] = try await runtime.request("/light-videos")
+        guard identity == privacyID, !concealed else { return }
+        uploads = newUploads; encryptedUploads = newEncrypted; library = newLibrary; trash = newTrash; videos = newVideos
+        needsRefresh = false
     }
     func poll() async {
         while !Task.isCancelled {
-            let working = uploads.contains { $0.state == "uploading" } || videos.contains { $0.state == "creating" }
-            if runtime.ready && !concealed && !busy && (needsRefresh || working) {
+            let working = (uploads + encryptedUploads).contains { $0.state == "uploading" } || videos.contains { $0.state == "creating" }
+            if runtime.ready && !concealed && !busy && !awsLoginRequired && (needsRefresh || working) {
                 await run { try await refresh() }
             }
             do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { return }
         }
     }
-    func scan(_ path: String) async throws -> FolderUpload {
-        try await runtime.request("/folder-uploads/scan", method: "POST", body: ["path": path, "bucket": bucket, "profile": profile, "region": region])
+    func scan(_ path: String, encrypted: Bool = false) async throws -> FolderUpload {
+        try await runtime.request(encrypted ? "/encrypted-uploads/scan" : "/folder-uploads/scan", method: "POST", body: ["path": path, "bucket": bucket, "profile": profile, "region": region])
     }
-    func upload(_ plan: FolderUpload, pause: Bool = false) async throws {
-        try await runtime.action("/folder-uploads/\(plan.id)/\(pause ? "pause" : "start")", body: pause ? [:] : ["confirmUpload": true])
+    func upload(_ plan: FolderUpload, pause: Bool = false, encrypted: Bool = false) async throws {
+        var body: [String: Any] = pause ? [:] : ["confirmUpload": true]
+        if encrypted && !pause {
+            guard let secret = try MediaSecretStore.load() else { throw SealedError.wrongKey }
+            body["keyID"] = secret.keyID; body["masterKey"] = secret.masterKey.base64EncodedString()
+        }
+        try await runtime.action("/\(encrypted ? "encrypted-uploads" : "folder-uploads")/\(plan.id)/\(pause ? "pause" : "start")", body: body)
+        try await refresh()
+    }
+    func moveToTrash(plan: String, items: [String] = [], folder: String? = nil) async throws {
+        try await runtime.action("/folder-library/\(plan)/trash", body: ["action": "trash", "confirm": true, "itemIds": items, "folderId": folder as Any? ?? NSNull()])
+        try await refresh()
+    }
+    func trashAction(_ entry: CloudTrashEntry, action: String) async throws {
+        try await runtime.action("/folder-library/\(entry.planId)/trash", body: ["action": action, "confirm": true, "entryId": entry.id])
         try await refresh()
     }
     func unlock(_ password: String) async throws {
@@ -73,10 +118,11 @@ final class MacModel: ObservableObject {
         unlockTimer?.cancel(); unlockTimer = nil
         needsRefresh = true
         hasFolderUnlock = false
-        privacyID = UUID(); library = []; uploads = []; videos = []; error = ""; notice = ""
+        hiddenPagesOpen = false
+        privacyID = UUID(); library = []; trash = []; uploads = []; encryptedUploads = []; videos = []; error = ""; notice = ""
         runtime.clearUnlock()
         // Removing the local cookie immediately invalidates this client's grant; no network required.
-        if !concealed && runtime.ready { await run { try await refresh() } }
+        if !concealed && runtime.ready && !awsLoginRequired { await run { try await refresh() } }
     }
     func lock(plan: String, folder: String, password: String?) async throws {
         try await runtime.action("/folder-locks/settings", body: ["planId": plan, "folderId": folder, "password": password as Any? ?? NSNull(), "confirmSave": true])

@@ -545,3 +545,104 @@ public struct FolderUnlock: Codable, Sendable {
     }
 }
 
+public struct SealedRoot: Codable, Sendable {
+    public let id: String
+    public let keyID: String
+    public let cipherBytes: Int64
+    private enum CodingKeys: String, CodingKey {
+        case id, keyID, cipherBytes
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(keyID, forKey: .keyID)
+        try container.encode(cipherBytes, forKey: .cipherBytes)
+    }
+}
+
+public struct SealedFolder: Codable, Sendable {
+    public let id: String
+    public let name: String
+    public let parentId: String?
+    private enum CodingKeys: String, CodingKey {
+        case id, name, parentId
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        if let value = parentId { try container.encode(value, forKey: .parentId) } else { try container.encodeNil(forKey: .parentId) }
+    }
+}
+
+public struct SealedItem: Codable, Sendable {
+    public let id: String
+    public let name: String
+    public let folderId: String
+    public let mimeType: String
+    public let byteSize: Int64
+    public let sha256: String
+    public let objectID: String
+    public let thumbnailID: String?
+    public let thumbnailBytes: Int64?
+    private enum CodingKeys: String, CodingKey {
+        case id, name, folderId, mimeType, byteSize, sha256, objectID, thumbnailID, thumbnailBytes
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(folderId, forKey: .folderId)
+        try container.encode(mimeType, forKey: .mimeType)
+        try container.encode(byteSize, forKey: .byteSize)
+        try container.encode(sha256, forKey: .sha256)
+        try container.encode(objectID, forKey: .objectID)
+        if let value = thumbnailID { try container.encode(value, forKey: .thumbnailID) } else { try container.encodeNil(forKey: .thumbnailID) }
+        if let value = thumbnailBytes { try container.encode(value, forKey: .thumbnailBytes) } else { try container.encodeNil(forKey: .thumbnailBytes) }
+    }
+}
+
+public struct SealedCatalog: Codable, Sendable {
+    public let schemaVersion: Int64
+    public let id: String
+    public let keyID: String
+    public let name: String
+    public let folders: [SealedFolder]
+    public let items: [SealedItem]
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, id, keyID, name, folders, items
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(id, forKey: .id)
+        try container.encode(keyID, forKey: .keyID)
+        try container.encode(name, forKey: .name)
+        try container.encode(folders, forKey: .folders)
+        try container.encode(items, forKey: .items)
+    }
+}
+
+public struct CloudTrashEntry: Codable, Sendable {
+    public let id: String
+    public let planId: String
+    public let name: String
+    public let state: String
+    public let byteSize: Int64
+    public let itemIds: [String]
+    public let folderIds: [String]
+    private enum CodingKeys: String, CodingKey {
+        case id, planId, name, state, byteSize, itemIds, folderIds
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(planId, forKey: .planId)
+        try container.encode(name, forKey: .name)
+        try container.encode(state, forKey: .state)
+        try container.encode(byteSize, forKey: .byteSize)
+        try container.encode(itemIds, forKey: .itemIds)
+        try container.encode(folderIds, forKey: .folderIds)
+    }
+}
+

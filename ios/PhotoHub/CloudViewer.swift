@@ -2,6 +2,7 @@ import SwiftUI
 import AVKit
 import CryptoKit
 import AssetLibraryContract
+import PhotoHubCore
 
 extension ReadRoot: Identifiable {}
 extension ReadItem: Identifiable {}
@@ -18,12 +19,14 @@ final class CloudViewerModel: ObservableObject {
     @Published var configuration: CloudConfiguration
     private let authentication = Authentication()
     private let network = URLSession(configuration: .ephemeral)
+    private let sealedRequests = SealedRequestGate()
     private var lockRevision: String?
+    @Published var hiddenPagesOpen = false
     @Published private(set) var hasFolderUnlock = false
     private var folderToken: String?
     private var folderTimer: Timer?
     func relock() {
-        folderTimer?.invalidate(); folderTimer = nil; folderToken = nil; hasFolderUnlock = false; roots = []; sessionID = UUID()
+        folderTimer?.invalidate(); folderTimer = nil; folderToken = nil; hasFolderUnlock = false; hiddenPagesOpen = false; roots = []; sessionID = UUID()
     }
     func unlockFolder(_ password: String) async throws {
         let result = try await get("/folder-unlock", as: FolderUnlock.self, method: "POST", body: try JSONSerialization.data(withJSONObject: ["password": password]))
@@ -142,9 +145,27 @@ final class CloudViewerModel: ObservableObject {
         catch { self.error = "フォルダを取得できません。ログイン・接続設定・通信を確認してください。" }
     }
     func catalog(_ root: ReadRoot) async throws -> ReadCatalog {
-        try await get("/catalogs/\(root.rootId)/\(root.id)", as: ReadCatalog.self)
+        try await sealedRequests.wait()
+        return try await get("/catalogs/\(root.rootId)/\(root.id)", as: ReadCatalog.self)
+    }
+    func encryptedRoots() async throws -> [SealedRoot] {
+        guard hiddenPagesOpen else { throw CancellationError() }
+        let identity = sessionID; try await sealedRequests.wait()
+        guard identity == sessionID, hiddenPagesOpen else { throw CancellationError() }
+        return try await get("/encrypted-library", as: [SealedRoot].self)
+    }
+    func encryptedURL(_ root: SealedRoot, objectID: String?) async throws -> URL {
+        guard hiddenPagesOpen else { throw CancellationError() }
+        let identity = sessionID; try await sealedRequests.wait()
+        guard identity == sessionID else { throw CancellationError() }
+        let path = objectID.map { "/encrypted-objects/\(root.keyID)/\(root.id)/\($0)/url" } ?? "/encrypted-catalogs/\(root.keyID)/\(root.id)/url"
+        let value = try await get(path, as: ReadURL.self)
+        guard let url = URL(string: value.url), url.scheme == "https", url.host?.hasSuffix(".amazonaws.com") == true, url.user == nil, url.password == nil else { throw ViewerError.configuration }
+        return url
     }
     func mediaURL(_ catalog: ReadCatalog, _ item: ReadItem, thumbnail: Bool = false) async throws -> URL {
+        try await sealedRequests.wait()
+        try Task.checkCancellation()
         let value = try await get("/catalogs/\(catalog.rootId)/\(catalog.id)/items/\(item.id)/url?role=\(thumbnail ? "thumbnail" : "original")", as: ReadURL.self)
         guard let url = URL(string: value.url), url.scheme == "https", let host = url.host,
               host.hasSuffix(".amazonaws.com"), url.user == nil, url.password == nil else { throw ViewerError.configuration }
@@ -179,6 +200,10 @@ struct CloudViewerRoot: View {
         TabView {
             NavigationStack { libraryScreen }
                 .tabItem { Label("見る", systemImage: "folder") }
+            if model.hiddenPagesOpen {
+                NavigationStack { PhoneSealedLibrary() }
+                    .tabItem { Label("暗号化", systemImage: "lock.shield") }
+            }
             NavigationStack { ReaderSettings() }
                 .tabItem { Label("設定", systemImage: "gearshape") }
         }.environmentObject(model).id(model.sessionID)
@@ -209,21 +234,59 @@ struct CloudViewerRoot: View {
         }.padding(28)
     }
     private var folderList: some View {
-        List {
-            if !model.error.isEmpty { Text(model.error).foregroundStyle(.red) }
-            ForEach(model.roots) { root in
-                NavigationLink { ReaderCatalogScreen(root: root) } label: {
-                    HStack {
-                        Image(systemName: "folder.fill").foregroundStyle(.green)
-                        VStack(alignment: .leading) {
-                            Text(root.name)
-                            Text("\(root.itemCount)件").font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }
+        ScrollView {
+            VStack(spacing: 20) {
+                if !model.error.isEmpty { Text(model.error).foregroundStyle(.red).padding() }
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 20) {
+                    ForEach(model.roots) { root in ReaderRootTile(root: root) }
+                }.padding(16)
+                if model.roots.isEmpty && model.error.isEmpty { ContentUnavailableView("フォルダはまだありません", systemImage: "folder") }
             }
-            if model.roots.isEmpty && model.error.isEmpty { Text("表示できるフォルダはありません。") }
         }.refreshable { await model.refresh() }
+    }
+}
+
+struct ReaderRootTile: View {
+    @EnvironmentObject private var model: CloudViewerModel
+    let root: ReadRoot
+    @State private var catalog: ReadCatalog?
+    var body: some View {
+        NavigationLink {
+            if let catalog { ReaderFolderScreen(catalog: catalog, folderID: catalog.folders.first { $0.parentId == nil }?.id) }
+            else { ReaderCatalogScreen(root: root) }
+        } label: {
+            ReaderFolderTile(name: root.name, catalog: catalog, folderID: catalog?.folders.first { $0.parentId == nil }?.id)
+        }.buttonStyle(.plain)
+        .task {
+            let identity = model.sessionID
+            do { let value = try await model.catalog(root); if identity == model.sessionID, !Task.isCancelled { catalog = value } }
+            catch { }
+        }
+    }
+}
+
+struct ReaderFolderTile: View {
+    let name: String
+    let catalog: ReadCatalog?
+    let folderID: String?
+    private var cover: ReadItem? {
+        guard let catalog else { return nil }
+        var ids = Set<String>(); if let folderID { ids.insert(folderID) }
+        for _ in 0..<catalog.folders.count {
+            let children = catalog.folders.filter { $0.parentId.map { ids.contains($0) } == true }.map(\.id)
+            let before = ids.count; ids.formUnion(children); if ids.count == before { break }
+        }
+        let candidates = catalog.items.filter { ids.contains($0.folderId) && $0.hasThumbnail }
+        return candidates.first { $0.mimeType.hasPrefix("image/") } ?? candidates.first
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Group {
+                if let catalog, let cover { ReaderThumbnail(catalog: catalog, item: cover) }
+                else { ZStack { Color.secondary.opacity(0.10); Image(systemName: "folder.fill").font(.largeTitle).foregroundStyle(.secondary) }.aspectRatio(1, contentMode: .fit) }
+            }.clipShape(RoundedRectangle(cornerRadius: 16))
+            Text(name).font(.subheadline.weight(.medium)).lineLimit(2).foregroundStyle(.primary)
+        }.accessibilityElement(children: .combine)
     }
 }
 
@@ -238,7 +301,7 @@ struct ReaderCatalogScreen: View {
             if let catalog { ReaderFolderScreen(catalog: catalog, folderID: catalog.folders.first(where: { $0.parentId == nil })?.id) }
             else if !error.isEmpty { ContentUnavailableView("読み込みに失敗しました", systemImage: "wifi.exclamationmark", description: Text(error)) }
             else { ProgressView("フォルダを読み込み中…") }
-        }.navigationTitle(root.name).task { do { catalog = try await model.catalog(root) } catch { self.error = "ログインと通信を確認して、フォルダを開き直してください。" } }
+        }.navigationTitle("").task { do { catalog = try await model.catalog(root) } catch { self.error = "ログインと通信を確認して、フォルダを開き直してください。" } }
         .navigationBarBackButtonHidden(model.hasFolderUnlock)
         .toolbar {
             if model.hasFolderUnlock {
@@ -260,17 +323,31 @@ struct ReaderFolderScreen: View {
     private var protectedChild: Bool {
         catalog.folders.contains { $0.id == folderID && $0.parentId != nil && $0.isLocked }
     }
+    @State private var selected: ReadItem?
+    private var items: [ReadItem] { catalog.items.filter { $0.folderId == folderID } }
     var body: some View {
-        List {
-            Label(catalog.folders.first(where: { $0.id == folderID })?.isLocked == true ? "鍵あり・解除中" : "このフォルダ自身の鍵なし", systemImage: "lock")
-                .font(.caption).foregroundStyle(.secondary)
-            ForEach(catalog.folders.filter { $0.parentId == folderID }) { folder in
-                NavigationLink { ReaderFolderScreen(catalog: catalog, folderID: folder.id).navigationTitle(folder.name) } label: { Label(folder.name, systemImage: "folder") }
-            }
-            ForEach(catalog.items.filter { $0.folderId == folderID }) { item in
-                NavigationLink { ReaderMediaScreen(catalog: catalog, item: item) } label: { HStack { ReaderThumbnail(catalog: catalog, item: item); VStack(alignment: .leading) { Text(item.name); Text(ByteCountFormatter.string(fromByteCount: item.byteSize, countStyle: .binary)).font(.caption).foregroundStyle(.secondary) } } }
-            }
-        }
+        ScrollView {
+            VStack(spacing: 16) {
+                let children = catalog.folders.filter { $0.parentId == folderID }
+                if !children.isEmpty {
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
+                        ForEach(children) { folder in
+                            NavigationLink { ReaderFolderScreen(catalog: catalog, folderID: folder.id) } label: {
+                                ReaderFolderTile(name: folder.name, catalog: catalog, folderID: folder.id)
+                            }.buttonStyle(.plain)
+                        }
+                    }.padding(.horizontal, 12)
+                }
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 3), spacing: 2) {
+                    ForEach(items) { item in
+                        Button { selected = item } label: { ReaderThumbnail(catalog: catalog, item: item) }
+                            .buttonStyle(.plain).accessibilityLabel(item.mimeType.hasPrefix("video/") ? "動画" : "写真")
+                    }
+                }
+                if children.isEmpty && items.isEmpty { ContentUnavailableView("空のフォルダ", systemImage: "folder") }
+            }.padding(.vertical, 8)
+        }.navigationTitle("").navigationBarTitleDisplayMode(.inline)
+        .fullScreenCover(item: $selected) { item in ReaderMediaScreen(catalog: catalog, items: items, initialID: item.id) }
         .navigationBarBackButtonHidden(protectedChild)
         .toolbar {
             if protectedChild {
@@ -290,36 +367,76 @@ struct ReaderThumbnail: View {
     let item: ReadItem
     @State private var image: UIImage?
     var body: some View {
-        Group { if let image { Image(uiImage: image).resizable().scaledToFit() } else { Image(systemName: item.mimeType.hasPrefix("video/") ? "play.rectangle" : "photo").foregroundStyle(.secondary) } }
-            .frame(width: 52, height: 52)
-            .task { if item.hasThumbnail { image = try? await model.image(catalog, item, thumbnail: true) } }
+        GeometryReader { geometry in
+            ZStack(alignment: .bottomTrailing) {
+                Color.secondary.opacity(0.10)
+                if let image { Image(uiImage: image).resizable().scaledToFill().frame(width: geometry.size.width, height: geometry.size.height).clipped() }
+                else { Image(systemName: item.mimeType.hasPrefix("video/") ? "play.rectangle" : "photo").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
+                if item.mimeType.hasPrefix("video/") { Image(systemName: "play.fill").font(.caption).foregroundStyle(.white).padding(7).background(.black.opacity(0.45), in: Circle()).padding(6) }
+            }
+        }.aspectRatio(1, contentMode: .fit)
+        .task {
+            let identity = model.sessionID
+            if item.hasThumbnail, let value = try? await model.image(catalog, item, thumbnail: true), identity == model.sessionID, !Task.isCancelled { image = value }
+        }.onDisappear { image = nil }
     }
 }
 
 struct ReaderMediaScreen: View {
     @EnvironmentObject private var model: CloudViewerModel
+    @Environment(\.dismiss) private var dismiss
     let catalog: ReadCatalog
-    let item: ReadItem
+    let items: [ReadItem]
+    let initialID: String
+    @State private var index = 0
+    @State private var controls = true
     @State private var image: UIImage?
     @State private var player: AVPlayer?
     @State private var error = ""
+    private var item: ReadItem { items[index] }
     var body: some View {
-        VStack {
-            if let image { Image(uiImage: image).resizable().scaledToFit() }
-            else if let player { VideoPlayer(player: player) }
-            else if !error.isEmpty { ContentUnavailableView("表示できません", systemImage: "exclamationmark.triangle", description: Text(error)) }
-            else { ProgressView("読み込み中…") }
-            if item.mimeType.hasPrefix("video/") { Button("再生用の接続を更新") { Task { await load() } }.font(.caption); Text("再生・シークが止まった場合に更新してください。自動再生は行いません。").font(.caption2).foregroundStyle(.secondary) }
-        }.padding().navigationTitle(item.name).navigationBarTitleDisplayMode(.inline)
-        .task { await load() }
-        .onDisappear { player?.pause(); player = nil; image = nil }
+        ZStack {
+            Color.black.ignoresSafeArea()
+            Group {
+                if let image { Image(uiImage: image).resizable().scaledToFit().contentShape(Rectangle()).onTapGesture { controls.toggle() } }
+                else if let player { VideoPlayer(player: player) }
+                else if !error.isEmpty { VStack { Text(error); Button("再試行") { Task { await load() } } }.foregroundStyle(.white).padding() }
+                else { ProgressView().tint(.white) }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                .simultaneousGesture(DragGesture(minimumDistance: 40).onEnded { value in
+                    guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                    let next = index + (value.translation.width < 0 ? 1 : -1)
+                    if items.indices.contains(next) { clear(); index = next; controls = true }
+                })
+            if controls || player != nil {
+                VStack {
+                    HStack {
+                        Button { dismiss() } label: { Image(systemName: "xmark").padding(12).background(.black.opacity(0.5), in: Circle()) }.accessibilityLabel("閉じる")
+                        Spacer()
+                        if item.mimeType.hasPrefix("video/") { Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise").padding(12).background(.black.opacity(0.5), in: Circle()) }.accessibilityLabel("再生用の接続を更新") }
+                    }.foregroundStyle(.white).padding()
+                    Spacer()
+                }
+            }
+        }.onAppear { index = items.firstIndex { $0.id == initialID } ?? 0 }
+        .task(id: item.id) { await load() }
+        .onDisappear { clear() }
     }
+    private func clear() { player?.pause(); player = nil; image = nil; error = "" }
     private func load() async {
-        error = ""
+        let current = item; let identity = model.sessionID
+        clear()
         do {
-            if item.mimeType.hasPrefix("video/") { let url = try await model.mediaURL(catalog, item); player?.pause(); player = AVPlayer(url: url) }
-            else { image = try await model.image(catalog, item) }
-        } catch { self.error = "通信・対応形式・画像100MiBの上限を確認してください。ログインが切れた場合は入り直してください。" }
+            if current.mimeType.hasPrefix("video/") {
+                let url = try await model.mediaURL(catalog, current)
+                guard !Task.isCancelled, identity == model.sessionID, current.id == item.id else { return }
+                player = AVPlayer(url: url)
+            } else {
+                let value = try await model.image(catalog, current)
+                guard !Task.isCancelled, identity == model.sessionID, current.id == item.id else { return }
+                image = value
+            }
+        } catch { if !Task.isCancelled, identity == model.sessionID, current.id == item.id { self.error = "表示できません。通信を確認してください。" } }
     }
 }
 
@@ -330,12 +447,15 @@ struct ReaderSettings: View {
         Form {
             if model.signedIn { Section { FolderUnlockControl() } }
             Section { if model.signedIn { Button("ログアウト") { model.signOut() } } else { Button("本人ログイン") { Task { await model.login() } }.disabled(!model.configuration.valid || model.busy) } }
-            Section("接続設定") {
+            if model.hiddenPagesOpen { Section("暗号化の鍵") { PhoneSealedKeyImport() } }
+            Section {
+                DisclosureGroup("接続設定") {
                 TextField("閲覧API URL", text: $value.api).textInputAutocapitalization(.never).autocorrectionDisabled()
                 TextField("Cognito domain", text: $value.domain).textInputAutocapitalization(.never).autocorrectionDisabled()
                 TextField("Client ID", text: $value.clientID).textInputAutocapitalization(.never).autocorrectionDisabled()
                 TextField("本人sub", text: $value.owner).textInputAutocapitalization(.never).autocorrectionDisabled()
                 Button("接続先を保存") { model.saveConfiguration(value) }.disabled(!value.valid)
+                }
             }
         }.navigationTitle("設定").onAppear { value = model.configuration }
     }
@@ -346,7 +466,18 @@ struct FolderUnlockControl: View {
     @State private var showing = false
     var body: some View {
         Button("隠したフォルダを開く") { showing = true }
-            .sheet(isPresented: $showing) { FolderUnlockScreen() }
+            .sheet(isPresented: $showing) {
+                let identity = model.sessionID
+                HiddenPagePINSheet { pin in
+                    guard model.sessionID == identity else { return }
+                    try? await model.unlockFolder(pin)
+                    guard model.sessionID == identity || model.hasFolderUnlock else { return }
+                    model.hiddenPagesOpen = true
+                }
+            }
+        if model.hiddenPagesOpen {
+            Button("閉じて隠す") { model.relock(); Task { await model.refresh() } }
+        }
     }
 }
 

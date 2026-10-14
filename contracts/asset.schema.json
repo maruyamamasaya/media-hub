@@ -866,6 +866,179 @@
           "type": "integer"
         }
       }
+    },
+    "SealedRoot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "keyID",
+        "cipherBytes"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "keyID": {
+          "type": "string"
+        },
+        "cipherBytes": {
+          "type": "integer"
+        }
+      }
+    },
+    "SealedFolder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "parentId"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "SealedItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "folderId",
+        "mimeType",
+        "byteSize",
+        "sha256",
+        "objectID",
+        "thumbnailID",
+        "thumbnailBytes"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "folderId": {
+          "type": "string"
+        },
+        "mimeType": {
+          "type": "string"
+        },
+        "byteSize": {
+          "type": "integer"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "objectID": {
+          "type": "string"
+        },
+        "thumbnailID": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thumbnailBytes": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
+    },
+    "SealedCatalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "id",
+        "keyID",
+        "name",
+        "folders",
+        "items"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "keyID": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "folders": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SealedFolder"
+          }
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SealedItem"
+          }
+        }
+      }
+    },
+    "CloudTrashEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "planId",
+        "name",
+        "state",
+        "byteSize",
+        "itemIds",
+        "folderIds"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "planId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "byteSize": {
+          "type": "integer"
+        },
+        "itemIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "folderIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
     }
   }
 }

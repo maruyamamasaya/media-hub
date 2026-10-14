@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		389E85F2106A40B28C08F335 /* SealedViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BC575D1532947BB93A520B0 /* SealedViewer.swift */; };
 		09623195C3C640AA01BA5258 /* PhotoHubCore in Frameworks */ = {isa = PBXBuildFile; productRef = 1768C11DE422A8D71300AADC /* PhotoHubCore */; };
 		24F78D761C9C2C3E0F0BD7E0 /* Views.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E6150EC18B810B04C79BA3C /* Views.swift */; };
 		312B4188F8EB0C35EBC50526 /* FolderSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = D97661A47B38FC01E71AACD5 /* FolderSync.swift */; };
@@ -32,6 +33,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		2BC575D1532947BB93A520B0 /* SealedViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SealedViewer.swift; sourceTree = "<group>"; };
 		0E6150EC18B810B04C79BA3C /* Views.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views.swift; sourceTree = "<group>"; };
 		1019FCA07D6E5086FE2DCA71 /* Cloud.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Cloud.swift; sourceTree = "<group>"; };
 		33312C4AD601CF10ED759337 /* PhotoHubApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoHubApp.swift; sourceTree = "<group>"; };
@@ -74,6 +76,7 @@
 				EEB2C62CDFF2B03DA2B9A4FC /* Assets.xcassets */,
 				1019FCA07D6E5086FE2DCA71 /* Cloud.swift */,
 				6B54F568961EACDDC715F383 /* CloudViewer.swift */,
+				2BC575D1532947BB93A520B0 /* SealedViewer.swift */,
 				D97661A47B38FC01E71AACD5 /* FolderSync.swift */,
 				35397868F41384409B36AE61 /* Info.plist */,
 				764BC9FF31567E8DACB4C584 /* LibraryModel.swift */,
@@ -215,6 +218,7 @@
 			files = (
 				6B31A9BA40CA75006CDE1F23 /* Cloud.swift in Sources */,
 				C7AE067472F93802C99DCBA5 /* CloudViewer.swift in Sources */,
+				389E85F2106A40B28C08F335 /* SealedViewer.swift in Sources */,
 				312B4188F8EB0C35EBC50526 /* FolderSync.swift in Sources */,
 				3FFCE5327E1DDCD5A5CEFF49 /* LibraryModel.swift in Sources */,
 				59A5A0D0143F66D08174C798 /* PhotoHubApp.swift in Sources */,

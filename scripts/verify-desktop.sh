@@ -3,6 +3,7 @@ set -eu
 cd "$(dirname "$0")/.."
 .venv/bin/python scripts/generate-contracts.py --check
 .venv/bin/python scripts/verify.py
+sh scripts/build-mac-app.sh
 .venv/bin/python -m unittest discover -s local-api/tests -v
 .venv/bin/python -m unittest discover -s backend/tests -v
 export CLANG_MODULE_CACHE_PATH=${CLANG_MODULE_CACHE_PATH:-/tmp/media-hub-clang-cache}

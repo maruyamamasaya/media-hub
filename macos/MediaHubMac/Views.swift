@@ -2,6 +2,7 @@ import AppKit
 import AssetLibraryContract
 import AVKit
 import SwiftUI
+import PhotoHubCore
 
 struct MacRootView: View {
     @ObservedObject var model: MacModel
@@ -9,7 +10,7 @@ struct MacRootView: View {
     @State private var page = "S3フォルダ"
     var body: some View {
         NavigationSplitView {
-            List(["S3フォルダ", "アップロード", "軽量版を作る", "設定"], id: \.self, selection: $page) { Text($0) }
+            List(["S3フォルダ", "アップロード"] + (model.hiddenPagesOpen ? ["暗号化フォルダ", "暗号化アップロード"] : []) + ["軽量版を作る", "設定"], id: \.self, selection: $page) { Text($0) }
                 .navigationTitle("media-hub").frame(minWidth: 180)
         } detail: {
             if model.concealed { Text("アプリに戻るとフォルダを再確認します。") }
@@ -18,9 +19,17 @@ struct MacRootView: View {
                 VStack(spacing: 0) {
                     if !model.notice.isEmpty { Label(model.notice, systemImage: "checkmark.circle.fill").foregroundStyle(.green).padding() }
                     if !model.error.isEmpty { Text(model.error).foregroundStyle(.red).padding().textSelection(.enabled) }
+                    if model.awsLoginRequired {
+                        HStack {
+                            Button("AWSにログイン") { model.openAWSLogin() }
+                            Button("接続を確認") { Task { await model.checkAWSLogin() } }.disabled(model.busy)
+                        }.padding()
+                    }
                     Group {
                         switch page {
                         case "アップロード": UploadScreen()
+                        case "暗号化フォルダ": if model.hiddenPagesOpen { SealedLibraryScreen() }
+                        case "暗号化アップロード": if model.hiddenPagesOpen { UploadScreen(encrypted: true) }
                         case "軽量版を作る": NavigationStack { LightVideoScreen() }
                         case "設定": SettingsScreen()
                         default: LibraryScreen()
@@ -32,6 +41,15 @@ struct MacRootView: View {
         .frame(minWidth: 850, minHeight: 600)
         .tint(Color(red: 0.2, green: 0.4, blue: 0.31))
         .task { runtime.start(); await model.poll() }
+        .alert("AWSへの再ログインが必要です", isPresented: $model.showAWSLogin) {
+            Button("ログインする") { model.openAWSLogin() }
+            Button("あとで", role: .cancel) { }
+        } message: {
+            Text("ターミナルとブラウザでAWSにログインしてください。完了したら、この画面の「接続を確認」を押してください。")
+        }
+        .onChange(of: model.hiddenPagesOpen) { open in
+            if !open && page.hasPrefix("暗号化") { page = "S3フォルダ" }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
             model.concealed = true; Task { await model.relock() }
         }
@@ -55,86 +73,200 @@ struct SettingsScreen: View {
                 Text("通常は変更不要です。AWS秘密鍵は入力しません。")
             }
             Section("作業領域") { Text(model.runtime.dataRoot.path).textSelection(.enabled) }
+            Section("AWSログイン") {
+                Button("AWSにログイン") { model.openAWSLogin() }
+                Text(model.loginCommand).textSelection(.enabled)
+                Button("接続を確認") { Task { await model.checkAWSLogin() } }.disabled(model.busy)
+            }
         }.formStyle(.grouped)
     }
 }
 struct UploadScreen: View {
     @EnvironmentObject var model: MacModel
+    var encrypted = false
+    private var uploads: [FolderUpload] { encrypted ? model.encryptedUploads : model.uploads }
     @State private var selectedID: String?
     @State private var draft: FolderUpload?
     @State private var confirmed = false
-    private var plan: FolderUpload? { model.uploads.first { $0.id == selectedID } ?? draft }
+    private var plan: FolderUpload? { uploads.first { $0.id == selectedID } ?? draft }
+    private var choosingDisabled: Bool { model.busy || uploads.contains { $0.state == "uploading" } }
+    private func chooseFolder() {
+        guard let url = model.choose(directory: true) else { return }
+        Task { await model.run {
+            let value = try await model.scan(url.path, encrypted: encrypted)
+            draft = value; selectedID = value.id; confirmed = false
+            try await model.refresh()
+        } }
+    }
+    private func discard(_ value: FolderUpload) {
+        Task { await model.run {
+            try await model.runtime.action("/\(encrypted ? "encrypted-uploads" : "folder-uploads")/\(value.id)/discard")
+            // Clear locally before cloud refresh, so a connection error cannot revive this plan.
+            if encrypted { model.encryptedUploads.removeAll { $0.id == value.id } } else { model.uploads.removeAll { $0.id == value.id } }
+            if plan?.id == value.id || selectedID == value.id {
+                draft = nil; selectedID = nil; confirmed = false
+            }
+            model.notice = "アップロード予定を取り消しました。"
+        } }
+    }
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Text("フォルダをそのまま、あなただけのクラウドへ。").font(.title2)
-                Text("① 選ぶ　→　② 内容を確認　→　③ 手動送信").foregroundStyle(.secondary)
-                Button("フォルダを選ぶ", systemImage: "folder.badge.plus") {
-                    guard let url = model.choose(directory: true) else { return }
-                    Task { await model.run {
-                        let value = try await model.scan(url.path)
-                        draft = value; selectedID = value.id; confirmed = false
-                        try await model.refresh()
-                    } }
-                }.disabled(model.busy || model.uploads.contains { $0.state == "uploading" })
-                if let plan {
-                    UploadPlanView(plan: plan, confirmed: $confirmed)
-                    DisclosureGroup("フォルダの中身を確認") {
-                        ForEach(plan.folders, id: \.id) { folder in
-                            DisclosureGroup(folder.name) {
-                                ForEach(plan.items.filter { $0.folderId == folder.id }, id: \.id) { item in
-                                    HStack { Text(item.relativePath); Spacer(); Text(size(item.byteSize)); if item.state == "verified" { Image(systemName: "checkmark.seal") } }
-                                }
-                                if !plan.items.contains(where: { $0.folderId == folder.id }) { Text("この階層にファイルはありません。") }
-                            }
-                        }
+            VStack(alignment: .leading, spacing: 28) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(encrypted ? "暗号化して追加" : "写真と動画を追加").font(.system(size: 26, weight: .semibold))
+                        Text("フォルダを選び、内容を確認してアップロード。")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if plan != nil {
+                        Button("フォルダを選ぶ", systemImage: "plus") { chooseFolder() }
+                            .controlSize(.large).disabled(choosingDisabled || (encrypted && !model.encryptionReady))
                     }
                 }
-                Divider()
-                Text("これまでのアップロード").font(.headline)
-                ForEach(model.uploads, id: \.id) { value in
-                    Button { selectedID = value.id; draft = nil; confirmed = false } label: {
-                        HStack { Image(systemName: "folder"); Text(value.name); Spacer(); Text("\(value.items.count)件 · \(size(value.byteSize)) · \(stateName(value.state))") }
-                    }.disabled(model.busy || plan?.state == "uploading")
+                if encrypted { SealedKeyManagement() }
+                if let plan {
+                    UploadPlanView(plan: plan, confirmed: $confirmed, encrypted: encrypted)
+                    if plan.state == "planned" {
+                        Button("このアップロード予定を取り消す", role: .destructive) { discard(plan) }
+                            .buttonStyle(.borderless).disabled(model.busy)
+                    }
+                    DisclosureGroup("ファイルを確認") {
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(plan.folders, id: \.id) { folder in
+                                DisclosureGroup(folder.name) {
+                                    ForEach(plan.items.filter { $0.folderId == folder.id }, id: \.id) { item in
+                                        HStack {
+                                            Image(systemName: isVideo(item.name) ? "film" : "photo").foregroundStyle(.secondary)
+                                            Text(item.relativePath).lineLimit(1).truncationMode(.middle)
+                                            Spacer()
+                                            Text(size(item.byteSize)).foregroundStyle(.secondary)
+                                            if item.state == "verified" { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
+                                        }.padding(.vertical, 3)
+                                    }
+                                    if !plan.items.contains(where: { $0.folderId == folder.id }) { Text("空のフォルダ").foregroundStyle(.secondary) }
+                                }
+                            }
+                        }.padding(.top, 12)
+                    }.font(.callout)
+                } else {
+                    VStack(spacing: 16) {
+                        Image(systemName: "photo.on.rectangle.angled")
+                            .font(.system(size: 44, weight: .light)).foregroundStyle(Color.accentColor)
+                        Text("追加するフォルダを選んでください").font(.headline)
+                        Text(encrypted ? "原本・小画像・ファイル名を暗号化して保存します。" : "写真・動画とフォルダ構成をそのまま保存します。")
+                            .font(.callout).foregroundStyle(.secondary)
+                        Button("フォルダを選ぶ", systemImage: "folder.badge.plus") { chooseFolder() }
+                            .buttonStyle(.borderedProminent).controlSize(.large).disabled(choosingDisabled || (encrypted && !model.encryptionReady))
+                    }.frame(maxWidth: .infinity).padding(.vertical, 44)
+                        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 16))
                 }
-                Text("原本は残ります。自動同期なし。1ファイル5GiB・1回20GiB・10,000件まで。隠しファイル・リンク・対象外形式は送信しません。").font(.caption).foregroundStyle(.secondary)
-            }.padding(28)
-        }
+                if !uploads.isEmpty {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text("アップロード履歴").font(.headline)
+                        VStack(spacing: 0) {
+                            ForEach(uploads, id: \.id) { value in
+                                HStack(spacing: 12) {
+                                    Button {
+                                        selectedID = value.id; draft = nil; confirmed = false
+                                    } label: {
+                                        HStack(spacing: 14) {
+                                            Image(systemName: "folder.fill").font(.title3).foregroundStyle(Color.accentColor)
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                Text(value.name).fontWeight(.medium).foregroundStyle(.primary).lineLimit(1)
+                                                Text("\(value.items.count)件 · \(size(value.byteSize))").font(.caption).foregroundStyle(.secondary)
+                                            }
+                                            Spacer()
+                                            UploadStatus(state: value.state)
+                                        }.contentShape(Rectangle())
+                                    }.buttonStyle(.plain)
+                                    if value.state == "planned" {
+                                        Button { discard(value) } label: { Image(systemName: "trash") }
+                                            .buttonStyle(.borderless).foregroundStyle(.secondary)
+                                            .help("アップロード予定を取り消す").accessibilityLabel("\(value.name)のアップロード予定を取り消す")
+                                    }
+                                }.padding(16).disabled(model.busy || uploads.contains { $0.state == "uploading" })
+                                if value.id != uploads.last?.id { Divider().padding(.leading, 16) }
+                            }
+                        }.background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+                    }
+                }
+                DisclosureGroup("アップロードについて") {
+                    Text("Macの原本は残ります。自動同期は行いません。1ファイル5GiB・1回20GiB・10,000件まで。隠しファイル・リンク・対象外形式は送信しません。確認待ちの予定は取り消せます。")
+                        .padding(.top, 8)
+                }.font(.caption).foregroundStyle(.secondary)
+            }.frame(maxWidth: 800, alignment: .leading).padding(32).frame(maxWidth: .infinity)
+        }.background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+struct UploadStatus: View {
+    let state: String
+    private var color: Color { state == "complete" ? .green : state == "failed" ? .red : .secondary }
+    var body: some View {
+        Text(stateName(state)).font(.caption.weight(.medium))
+            .foregroundStyle(color).padding(.horizontal, 10).padding(.vertical, 5)
+            .background(color.opacity(0.10), in: Capsule())
     }
 }
 struct UploadPlanView: View {
     @EnvironmentObject var model: MacModel
     let plan: FolderUpload
     @Binding var confirmed: Bool
+    var encrypted = false
     var body: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 14) {
-                Text(plan.name).font(.title2.bold())
-                Text("\(plan.items.count)件 · \(size(plan.byteSize)) · \(plan.folders.count)フォルダ")
-                Text("非公開S3 · \(plan.region) · \(plan.bucket)").textSelection(.enabled)
-                Text(stateName(plan.state)).font(.headline)
-                if plan.skipped > 0 { Text("対象外 \(plan.skipped)件は送信しません。") }
-                if !plan.error.isEmpty { Text(plan.error).foregroundStyle(.red) }
-                ProgressView(value: Double(plan.completed), total: Double(max(plan.items.count, 1)))
-                Text("照合済み \(plan.completed) / \(plan.items.count)件")
-                if plan.state == "uploading" {
-                    Button("このファイルの完了後に停止") { Task { await model.run { try await model.upload(plan, pause: true) } } }
-                } else if plan.state == "complete" {
-                    Label("保存と照合が完了しました。Macの原本は残っています。", systemImage: "checkmark.seal")
-                } else {
-                    Toggle("このメディアとフォルダ名を、上の保存先へ送信する", isOn: $confirmed)
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(spacing: 16) {
+                Image(systemName: "folder.fill").font(.system(size: 32)).foregroundStyle(Color.accentColor)
+                    .frame(width: 60, height: 60).background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(plan.name).font(.title2.weight(.semibold)).lineLimit(2)
+                    Text("\(plan.items.count)件 · \(size(plan.byteSize)) · \(plan.folders.count)フォルダ").foregroundStyle(.secondary)
+                }
+                Spacer()
+                UploadStatus(state: plan.state)
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                Label(encrypted ? "保存先 · 暗号化して非公開S3へ" : "保存先 · 非公開S3", systemImage: "lock.shield").font(.callout.weight(.medium))
+                Text(plan.bucket).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                DisclosureGroup("接続の詳細") {
+                    Text("\(plan.region) · \(plan.profile)").font(.caption).foregroundStyle(.secondary).padding(.top, 6)
+                }.font(.caption).foregroundStyle(.secondary)
+            }
+            if plan.skipped > 0 { Text("対象外の\(plan.skipped)件は送信しません。").font(.callout).foregroundStyle(.secondary) }
+            if !plan.error.isEmpty { Label(plan.error, systemImage: "exclamationmark.circle").font(.callout).foregroundStyle(.red) }
+            if plan.state != "planned" {
+                VStack(alignment: .leading, spacing: 8) {
+                    ProgressView(value: Double(plan.completed), total: Double(max(plan.items.count, 1)))
+                    Text("照合済み \(plan.completed) / \(plan.items.count)件").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if plan.state == "uploading" {
+                Button("このファイルの完了後に停止") { Task { await model.run { try await model.upload(plan, pause: true, encrypted: encrypted) } } }
+            } else if plan.state == "complete" {
+                Label("保存と照合が完了しました", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                Text("Macの原本はそのまま残っています。").font(.caption).foregroundStyle(.secondary)
+            } else {
+                Toggle(encrypted ? "この内容を暗号化して上の保存先へ送信する" : "この内容を上の保存先へアップロードする", isOn: $confirmed).toggleStyle(.checkbox)
+                HStack {
+                    Text("Macの原本は残ります。").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
                     Button(plan.state == "planned" ? "アップロードを開始" : "アップロードを再開") {
                         confirmed = false
-                        Task { await model.run { try await model.upload(plan) } }
-                    }.buttonStyle(.borderedProminent).disabled(!confirmed)
+                        Task { await model.run { try await model.upload(plan, encrypted: encrypted) } }
+                    }.buttonStyle(.borderedProminent).controlSize(.large).disabled(!confirmed || model.awsLoginRequired)
                 }
-            }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
-        }.disabled(model.busy)
+            }
+        }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 16))
+            .disabled(model.busy)
     }
 }
 struct LibraryScreen: View {
     @EnvironmentObject var model: MacModel
     @State private var unlocking = false
+    @State private var showingTrash = false
+    @State private var rootTrash: FolderUpload?
     @State private var path: [String] = []
     @State private var previousPath: [String] = []
     private func folder(_ key: String) -> MediaFolder? {
@@ -147,6 +279,7 @@ struct LibraryScreen: View {
         if let root = plan.folders.first(where: { $0.parentId == nil }) {
             let key: String = plan.id + ":" + root.id
             NavigationLink(value: key) { FolderTile(name: plan.name) }.buttonStyle(.plain)
+                .contextMenu { Button("フォルダをごみ箱へ", role: .destructive) { rootTrash = plan } }
         }
     }
     var body: some View {
@@ -173,10 +306,14 @@ struct LibraryScreen: View {
                 }
             }
             .toolbar {
+                Button("ごみ箱", systemImage: "trash") { showingTrash = true }
                 Button("隠したフォルダを開く", systemImage: "lock.open") { unlocking = true }
-                if model.hasFolderUnlock { Button("閉じて隠す", systemImage: "lock") { Task { await model.relock() } } }
+                if model.hiddenPagesOpen || model.hasFolderUnlock { Button("閉じて隠す", systemImage: "lock") { Task { await model.relock() } } }
                 Button("更新", systemImage: "arrow.clockwise") { Task { await model.run { try await model.refresh() } } }
             }
+        }
+        .onChange(of: model.library.flatMap { plan in plan.folders.map { "\(plan.id):\($0.id)" } }) { available in
+            if let invalid = path.firstIndex(where: { !available.contains($0) }) { path = Array(path.prefix(invalid)) }
         }
         .onChange(of: path) { new in
             let old = previousPath
@@ -187,7 +324,21 @@ struct LibraryScreen: View {
                 Task { await model.relock() }
             }
         }
-        .sheet(isPresented: $unlocking) { FolderPasswordSheet() }
+        .sheet(isPresented: $showingTrash) { CloudTrashScreen() }
+        .confirmationDialog("「\(rootTrash?.name ?? "フォルダ")」全体をごみ箱へ移しますか？", isPresented: Binding(get: { rootTrash != nil }, set: { if !$0 { rootTrash = nil } }), titleVisibility: .visible) {
+            if let plan = rootTrash, let root = plan.folders.first(where: { $0.parentId == nil }) {
+                Button("ごみ箱へ移す", role: .destructive) { Task { await model.run { try await model.moveToTrash(plan: plan.id, folder: root.id); rootTrash = nil } } }
+            }
+        } message: { Text("Macの元ファイルは保持します。S3の一覧から外し、ごみ箱から復元できます。") }
+        .sheet(isPresented: $unlocking) {
+            let identity = model.privacyID
+            HiddenPagePINSheet { pin in
+                guard !model.concealed, model.privacyID == identity else { return }
+                try? await model.unlock(pin)
+                guard !model.concealed, model.privacyID == identity || model.hasFolderUnlock else { return }
+                model.hiddenPagesOpen = true
+            }
+        }
     }
 }
 struct FolderPasswordSheet: View {
@@ -219,7 +370,7 @@ struct FolderPasswordSheet: View {
             catch {
                 guard !model.concealed else { return }
                 operationError = error.localizedDescription
-                model.error = error.localizedDescription
+                model.handle(error)
             }
         }
     }
@@ -288,7 +439,7 @@ struct MediaScreen: View {
                 if isVideo(name) { player = AVPlayer(url: file) }
                 else if let loaded = NSImage(contentsOf: file) { image = loaded }
                 else { error = "この形式は表示できません。" }
-            } catch { if identity == model.privacyID { self.error = error.localizedDescription } }
+            } catch { if identity == model.privacyID { self.error = error.localizedDescription; model.handle(error) } }
         }
         .onDisappear { player?.pause(); player = nil; image = nil; if let temporary { try? FileManager.default.removeItem(at: temporary) }; temporary = nil }
     }
@@ -343,5 +494,35 @@ struct LightVideoScreen: View {
     }
     func videoAction(_ job: LightVideo, action: String) {
         Task { await model.run { try await model.runtime.action("/light-videos/\(job.id)/\(action)"); try await model.refresh() } }
+    }
+}
+
+struct CloudTrashScreen: View {
+    @EnvironmentObject var model: MacModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var purging: CloudTrashEntry?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack { Text("S3のごみ箱").font(.title2); Spacer(); Button("閉じる") { dismiss() } }
+            Text("完全削除すると原本・小画像・過去バージョンを消去し、復元できません。Macの元ファイルは保持します。").foregroundStyle(.secondary)
+            if model.trash.isEmpty { Text("ごみ箱は空です。").padding() }
+            List(model.trash, id: \.id) { entry in
+                HStack {
+                    VStack(alignment: .leading) {
+                        Text(entry.name)
+                        Text("\(entry.itemIds.count)ファイル · \(size(entry.byteSize))" + (entry.state == "deleting" ? " · 完全削除中（再試行可能）" : "")).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("復元") { Task { await model.run { try await model.trashAction(entry, action: "restore") } } }.disabled(entry.state != "trashed")
+                    Button(entry.state == "deleting" ? "完全削除を再試行" : "完全削除", role: .destructive) { purging = entry }
+                }
+            }
+            if !model.error.isEmpty { Text(model.error).foregroundStyle(.red) }
+        }.padding(20).frame(minWidth: 650, minHeight: 380).disabled(model.busy)
+        .confirmationDialog("「\(purging?.name ?? "対象")」を完全削除しますか？", isPresented: Binding(get: { purging != nil }, set: { if !$0 { purging = nil } }), titleVisibility: .visible) {
+            if let entry = purging {
+                Button("完全削除する", role: .destructive) { Task { await model.run { try await model.trashAction(entry, action: "purge"); purging = nil } } }
+            }
+        } message: { Text("この操作は取り消せません。S3上の対象データと過去バージョンを削除します。") }
     }
 }

@@ -4,11 +4,17 @@ Macの軽量版作成は上部「軽量版を作る」から動画選択→作�
 
 現在の通常運用は [S3原本・Mac送信・iPhone閲覧](docs/S3-READER.md)。以下のローカル／旧iOS操作は旧版の保全・開発用記録。新UIでは取り込み・同期・ローカル保存を提供しない。
 
+サムネイルは非公開S3に保存し端末で長期保管しない。新規送信時に生成し、既存素材への追加と旧閲覧キャッシュ整理は [Macの操作](docs/MAC-SWIFTUI.md)、全体料金の更新見積もりは [費用比較の第9節](docs/COST-PLAN-2026-10-14.md) を参照。
+
 # 開発・運用
 
 Mac版はSwiftUI。通常起動は `sh scripts/start-desktop.sh`。Windows対応は終了。現行手順は [Mac SwiftUI](docs/MAC-SWIFTUI.md)。旧Electron試作は保全用に残す。
 
 新しいローカルWeb版の準備・起動・バックアップは [WEB-OPERATIONS.md](docs/WEB-OPERATIONS.md)。ルートの `scripts/setup-web.ps1` → `scripts/start-web.ps1` で `http://127.0.0.1:8765` を開く。Webと既存iOSの保存領域は別で、自動移行・同期は未接続。以下の手順は既存iOS版。
+
+## 暗号化アップロード
+
+通常の送信とは別に「暗号化アップロード」を使用する。最初にMacでパスワード付き復旧ファイルを保存し、iPhoneで取り込む。本人がパスワードを入力し、鍵・パスワードをチャットへ送らない。操作・制約・復旧方法は [暗号化アップロード](docs/ENCRYPTED-UPLOAD.md)。
 
 ## Local Development
 `ios/PhotoHub.xcodeproj` をXcodeで開き、PhotoHub schemeでiPhoneシミュレータへ実行する。Xcode 26.6で確認、対応iOS 17以上。XcodeGenは `ios/project.yml` からの再生成時だけ必要（生成済みプロジェクトを含む）。
@@ -62,3 +68,5 @@ MacのS3手動アップロードは「設定 → S3フォルダアップロー�
 
 ## マイショートの動画
 Web/Windowsの閲覧用動画生成には、APIを起動する環境のPATHにFFmpeg（任意、ffprobeで寸法取得）が必要。自動導入・同梱はしない。未導入でも原本保管は可能。導入後はAPI再起動と詳細のプレビュー再生成を行う。[対応形式・キャッシュ・iOSとの違い](docs/MY-SHORT.md)。
+
+S3の削除・復元はMacの「S3フォルダ → ごみ箱」。完全削除の対象・過去バージョン・失敗時再試行と、閲覧Lambdaの配布条件は [S3ごみ箱](docs/S3-TRASH.md) を参照。Mac元ファイルは保持する。

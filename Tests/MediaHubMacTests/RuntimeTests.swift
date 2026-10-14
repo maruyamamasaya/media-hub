@@ -3,6 +3,25 @@ import XCTest
 
 final class RuntimeTests: XCTestCase {
     @MainActor
+    func testAWSLoginErrorPromptsOnceAndPausesRefresh() async throws {
+        let root = FileManager.default.temporaryDirectory
+        let model = MacModel(runtime: MacRuntime(root: root, dataRoot: root))
+        let response = HTTPURLResponse(url: URL(string: "http://127.0.0.1:1234")!, statusCode: 401, httpVersion: nil, headerFields: nil)!
+        let data = Data(#"{"code":"aws_login_required","message":"Login required"}"#.utf8)
+        do { try MacRuntime.validate(response, data: data); XCTFail("Expected login error") }
+        catch { model.handle(error) }
+        XCTAssertTrue(model.awsLoginRequired)
+        XCTAssertTrue(model.showAWSLogin)
+        model.showAWSLogin = false
+        model.handle(MacAPIError.awsLoginRequired)
+        XCTAssertFalse(model.showAWSLogin)
+        await model.relock()
+        XCTAssertTrue(model.awsLoginRequired)
+        model.handle(MacAPIError.message("Permission denied"))
+        XCTAssertFalse(model.showAWSLogin)
+        XCTAssertEqual(MacModel.shellQuote("a'b;$(echo unsafe)"), "'a'\\''b;$(echo unsafe)'")
+    }
+    @MainActor
     func testPrivateChildAuthenticationLockAndShutdown() async throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         guard FileManager.default.isExecutableFile(atPath: root.appendingPathComponent(".venv/bin/python").path) else { throw XCTSkip("Python API environment is not installed") }

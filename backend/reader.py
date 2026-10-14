@@ -6,6 +6,8 @@ import base64
 from urllib.parse import unquote
 from app import client, response, valid_id
 import folder_security as privacy
+import encrypted_reader
+import catalog_trash
 
 MAX_CATALOG_BYTES = 4 * 1024 * 1024
 
@@ -60,6 +62,7 @@ def catalog(s3, bucket, root, upload):
         if thumb is not None and thumb != f'media-hub/thumbnails/{asset}/{sha}.png':
             raise ValueError('Invalid thumbnail location')
         item_ids.add(asset)
+    catalog_trash.validate(value)
     return value
 
 
@@ -83,6 +86,9 @@ def handler(event, context):
         return response(405, {'error': 'Read only'})
     try:
         s3 = client()
+        if path.startswith('/encrypted-'):
+            status, value = encrypted_reader.handle(s3, bucket, path)
+            return response(status, value)
         settings = privacy.load(s3, bucket)
         def reply(status, body):
             result = response(status, body)
@@ -118,8 +124,12 @@ def handler(event, context):
                     parts = entry['Key'].split('/')
                     if len(parts) != 4 or not valid_id(parts[2]) or not parts[3].endswith('.json') or not valid_id(parts[3][:-5]):
                         continue
-                    if parts[2] not in latest or entry['LastModified'] > latest[parts[2]]['LastModified']:
-                        latest[parts[2]] = entry
+                    value = catalog(s3, bucket, parts[2], parts[3][:-5])
+                    modified = entry['LastModified']
+                    rank = value.get('catalogCreatedAt', modified.timestamp() if hasattr(modified, 'timestamp') else modified)
+                    if parts[2] not in latest or rank > latest[parts[2]]['rank']:
+                        latest[parts[2]] = {'rank': rank, 'value': value}
+
                 token = listing.get('NextContinuationToken')
                 if not token:
                     break
@@ -127,9 +137,10 @@ def handler(event, context):
                 return reply(413, {'error': 'Catalog index limit exceeded'})
             roots = []
             for root, entry in latest.items():
-                upload = entry['Key'].split('/')[-1][:-5]
-                value = catalog(s3, bucket, root, upload)
-                value = privacy.visible(value, settings, allowed)
+                value = entry['value']
+                upload = value['id']
+                value = catalog_trash.active(value)
+                value = privacy.visible(value, settings, allowed) if value is not None else None
                 if value is None:
                     continue
                 roots.append({'id': upload, 'rootId': root, 'name': value['name'], 'itemCount': len(value['items']),
@@ -138,8 +149,8 @@ def handler(event, context):
         parts = path.strip('/').split('/')
         if len(parts) not in (3, 6) or parts[0] != 'catalogs':
             return reply(404, {'error': 'Not found'})
-        value = catalog(s3, bucket, parts[1], parts[2])
-        value = privacy.visible(value, settings, allowed)
+        value = catalog_trash.active(catalog(s3, bucket, parts[1], parts[2]))
+        value = privacy.visible(value, settings, allowed) if value is not None else None
         if value is None:
             return reply(404, {'error': 'Not found'})
         if len(parts) == 3:

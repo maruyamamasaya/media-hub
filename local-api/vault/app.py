@@ -13,7 +13,9 @@ from starlette.background import BackgroundTask
 from .service import Vault, VaultError
 from .folder_upload import FolderUploads
 from .light_video import LightVideos
+from .encrypted_upload import EncryptedUploads
 from .folder_privacy import FolderPrivacy
+from .cloud_trash import CloudTrash
 
 ROOT = Path(__file__).resolve().parents[2]
 ALLOWED_ORIGINS = {'http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:8765', 'http://localhost:8765'}
@@ -34,7 +36,10 @@ def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_ori
     app.state.vault = vault
     folder_uploads = FolderUploads(vault.root)
     app.state.folder_uploads = folder_uploads
+    encrypted = EncryptedUploads(vault.root)
+    app.state.encrypted_uploads = encrypted
     privacy = FolderPrivacy(folder_uploads)
+    trash = CloudTrash(folder_uploads)
     def folder_grant(request):
         return request.headers.get('x-folder-unlock', '') or request.cookies.get('folder_grant', '')
     light_videos = LightVideos(vault.root)
@@ -56,7 +61,7 @@ def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_ori
         if request.headers.get('sec-fetch-site') == 'cross-site':
             return JSONResponse({'code': 'forbidden_origin', 'message': '別サイトからのアクセスは許可されていません。'}, status_code=403)
         if cloud_only and request.url.path.startswith('/api/v1/') and not (
-            request.url.path == '/api/v1/status' or request.url.path.startswith('/api/v1/folder-uploads')
+            request.url.path == '/api/v1/status' or request.url.path.startswith('/api/v1/folder-uploads') or request.url.path.startswith('/api/v1/encrypted-')
             or request.url.path.startswith('/api/v1/folder-library')
             or request.url.path.startswith('/api/v1/light-videos')
             or request.url.path.startswith('/api/v1/folder-locks')
@@ -98,6 +103,38 @@ def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_ori
     @app.get('/api/v1/folder-uploads')
     def folder_upload_list(request: Request):
         return privacy.plans(folder_grant(request)) if privacy_enabled else folder_uploads.list()
+
+    @app.get('/api/v1/encrypted-uploads')
+    def encrypted_list():
+        return encrypted.list()
+
+    @app.post('/api/v1/encrypted-uploads/scan')
+    def encrypted_scan(body: dict):
+        return encrypted.scan(body)
+
+    @app.post('/api/v1/encrypted-uploads/{plan_id}/start')
+    def encrypted_start(plan_id: str, body: dict):
+        return encrypted.start(plan_id, body)
+
+    @app.post('/api/v1/encrypted-uploads/{plan_id}/pause')
+    def encrypted_pause(plan_id: str):
+        return encrypted.uploads.pause(plan_id)
+
+    @app.post('/api/v1/encrypted-uploads/{plan_id}/discard')
+    def encrypted_discard(plan_id: str):
+        return encrypted.uploads.discard(plan_id)
+
+    @app.get('/api/v1/encrypted-library')
+    def encrypted_library():
+        return encrypted.library()
+
+    @app.get('/api/v1/encrypted-library/{key_id}/{plan_id}/url')
+    def encrypted_catalog_url(key_id: str, plan_id: str):
+        return encrypted.url(key_id, plan_id)
+
+    @app.get('/api/v1/encrypted-library/{key_id}/{plan_id}/items/{object_id}/url')
+    def encrypted_object_url(key_id: str, plan_id: str, object_id: str):
+        return encrypted.url(key_id, plan_id, object_id)
 
     @app.get('/api/v1/light-videos')
     def light_video_list(request: Request):
@@ -147,7 +184,20 @@ def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_ori
 
     @app.get('/api/v1/folder-library')
     def folder_library(request: Request):
+        with folder_uploads.lock:
+            for summary in folder_uploads.list():
+                trash.sync(folder_uploads.read(summary['id']))
         return privacy.library(folder_grant(request)) if privacy_enabled else folder_uploads.library()
+
+    @app.get('/api/v1/folder-library/trash')
+    def folder_trash(request: Request):
+        return trash.entries(folder_grant(request), privacy if privacy_enabled else None)
+
+    @app.post('/api/v1/folder-library/{plan_id}/trash')
+    def mutate_folder_trash(plan_id: str, body: dict, request: Request):
+        if privacy_enabled:
+            privacy.require_full_plan(plan_id, folder_grant(request))
+        return trash.mutate(plan_id, body)
 
     @app.post('/api/v1/folder-locks/unlock')
     def folder_unlock(body: dict, request: Request, response: Response):
@@ -171,7 +221,16 @@ def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_ori
         path, mime, name = folder_uploads.media(plan_id, item_id, thumbnail)
         return FileResponse(path, media_type=mime, filename=name,
                             content_disposition_type='attachment' if download else 'inline',
+                            background=BackgroundTask(folder_uploads.release_media, path),
                             headers={'Cache-Control': 'private, no-store'})
+
+    @app.post('/api/v1/folder-uploads/{plan_id}/thumbnails')
+    def publish_folder_thumbnails(plan_id: str, body: dict, request: Request):
+        if set(body) != {'confirmUpload'} or body['confirmUpload'] is not True:
+            raise VaultError('invalid_request', 'サムネイルの送信を確認してください。')
+        if privacy_enabled:
+            privacy.require_full_plan(plan_id, folder_grant(request))
+        return folder_uploads.publish_thumbnails(plan_id)
 
     @app.post('/api/v1/folder-uploads/scan')
     def folder_upload_scan(body: dict, request: Request):
@@ -190,6 +249,12 @@ def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_ori
         if privacy_enabled:
             privacy.require_full_plan(plan_id, folder_grant(request))
         return folder_uploads.start(plan_id, body)
+
+    @app.post('/api/v1/folder-uploads/{plan_id}/discard')
+    def discard_folder_upload(plan_id: str, request: Request):
+        if privacy_enabled:
+            privacy.require_full_plan(plan_id, folder_grant(request))
+        return folder_uploads.discard(plan_id)
 
     @app.post('/api/v1/folder-uploads/{plan_id}/pause')
     def folder_upload_pause(plan_id: str, request: Request):

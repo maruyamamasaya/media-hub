@@ -226,3 +226,46 @@ export interface FolderUnlock {
   expiresIn: number;
 }
 
+export interface SealedRoot {
+  id: string;
+  keyID: string;
+  cipherBytes: number;
+}
+
+export interface SealedFolder {
+  id: string;
+  name: string;
+  parentId: string | null;
+}
+
+export interface SealedItem {
+  id: string;
+  name: string;
+  folderId: string;
+  mimeType: string;
+  byteSize: number;
+  sha256: string;
+  objectID: string;
+  thumbnailID: string | null;
+  thumbnailBytes: number | null;
+}
+
+export interface SealedCatalog {
+  schemaVersion: number;
+  id: string;
+  keyID: string;
+  name: string;
+  folders: SealedFolder[];
+  items: SealedItem[];
+}
+
+export interface CloudTrashEntry {
+  id: string;
+  planId: string;
+  name: string;
+  state: string;
+  byteSize: number;
+  itemIds: string[];
+  folderIds: string[];
+}
+

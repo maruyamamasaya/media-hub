@@ -34,13 +34,15 @@ class FakeCloud:
         if key not in self.objects:
             return None
         data = self.objects[key]
-        return {'ContentLength': len(data), 'ChecksumSHA256': 'bad' if self.corrupt else base64.b64encode(hashlib.sha256(data).digest()).decode(), 'VersionId': 'v1'}
+        return {'ContentLength': len(data), 'ChecksumSHA256': 'bad' if self.corrupt else base64.b64encode(hashlib.sha256(data).digest()).decode(), 'VersionId': 'v1', 'ETag': hashlib.sha256(data).hexdigest()}
 
-    def put(self, path, key, digest, mime):
+    def put(self, path, key, digest, mime, etag=None):
         if self.fail_catalog and '/catalogs/' in key:
             raise VaultError('cloud_error', 'catalog failed', 502)
-        if key in self.objects:
+        if key in self.objects and etag is None:
             raise AssertionError('overwrite')
+        if etag is not None and etag != hashlib.sha256(self.objects[key]).hexdigest():
+            raise VaultError('conflict', 'etag mismatch', 409)
         data = path.read_bytes()
         assert base64.b64encode(hashlib.sha256(data).digest()).decode() == digest
         self.objects[key] = data
@@ -76,6 +78,43 @@ class FolderUploadTests(unittest.TestCase):
         self.assertEqual(self.cloud.puts, [])
         raw = self.service.read(plan['id'])
         self.assertTrue(all('Trip' not in i['objectKey'] for i in raw['items']))
+
+    def test_discard_unstarted_plan_preserves_originals_and_cloud(self):
+        plan = self.scan()
+        original = (self.source / 'movie.MP4').read_bytes()
+        self.assertTrue(self.service.discard(plan['id'])['discarded'])
+        self.assertEqual(self.service.list(), [])
+        self.assertEqual((self.source / 'movie.MP4').read_bytes(), original)
+        self.assertEqual(self.cloud.puts, [])
+        self.assertTrue((self.service.root / 'discarded' / plan['id'] / 'plan.json').is_file())
+        self.assertEqual(FolderUploads(self.root / 'library').list(), [])
+        with self.assertRaises(VaultError) as failure:
+            self.service.start(plan['id'], {'confirmUpload': True})
+        self.assertEqual(failure.exception.code, 'not_found')
+
+    def test_discard_rejects_active_or_sent_plans(self):
+        plan = self.scan()
+        self.service.running.add(plan['id'])
+        with self.assertRaises(VaultError):
+            self.service.discard(plan['id'])
+        self.service.running.clear()
+        for state in ('uploading', 'paused', 'failed', 'complete'):
+            raw = self.service.read(plan['id'])
+            raw['state'] = state
+            self.service.save(raw)
+            with self.subTest(state=state), self.assertRaises(VaultError):
+                self.service.discard(plan['id'])
+        self.assertEqual(len(self.service.list()), 1)
+
+    def test_discard_endpoint(self):
+        app = create_app(self.root / 'api-library')
+        client = TestClient(app)
+        app.state.folder_uploads.client_factory = lambda *args: self.cloud
+        plan = app.state.folder_uploads.scan({'path': str(self.source), 'bucket': 'test-bucket', 'profile': 'test-profile', 'region': 'ap-northeast-1'})
+        endpoint = f'/api/v1/folder-uploads/{plan["id"]}/discard'
+        self.assertEqual(client.post(endpoint, headers={'host': 'evil.invalid'}).status_code, 403)
+        self.assertEqual(client.post(endpoint, headers={'host': '127.0.0.1:8765'}).status_code, 200)
+        self.assertEqual(client.post(endpoint, headers={'host': '127.0.0.1:8765'}).status_code, 404)
 
     def test_upload_keeps_sources_and_commits_private_catalog(self):
         plan = self.scan()
@@ -207,6 +246,17 @@ class FolderUploadTests(unittest.TestCase):
             self.assertIn('--if-none-match', run.call_args.args[0])
             self.assertNotIn('shell', run.call_args.kwargs)
 
+    def test_expired_login_is_distinct_from_permission_and_network_errors(self):
+        import subprocess
+        cli = S3CLI('test-bucket', 'profile', 'ap-northeast-1')
+        for message, code in [("Your session has expired. Please reauthenticate using 'aws login'.", 'aws_login_required'),
+                              ('ExpiredToken', 'aws_login_required'), ('Unable to locate credentials', 'aws_login_required'),
+                              ('AccessDenied', 'cloud_error'), ('Could not connect to the endpoint URL', 'cloud_error')]:
+            with self.subTest(message=message), patch('vault.folder_upload.subprocess.run', return_value=subprocess.CompletedProcess([], 1, '', message)):
+                with self.assertRaises(VaultError) as failure:
+                    cli.head('key')
+                self.assertEqual(failure.exception.code, code)
+
 class CloudLibraryTests(unittest.TestCase):
     setUp = FolderUploadTests.setUp
     scan = FolderUploadTests.scan
@@ -226,68 +276,135 @@ class CloudLibraryTests(unittest.TestCase):
         library = self.service.library()
         self.assertEqual([p['id'] for p in library], [saved['id']])
 
-    def test_original_always_uses_s3_even_when_mac_source_exists(self):
+    def test_original_and_thumbnail_always_use_s3(self):
         plan = self.make_saved()
-        image = next(i for i in plan['items'] if i['name'] == 'image.png')
+        item = next(i for i in plan['items'] if i['name'] == 'image.png')
         (self.source / 'Trip' / 'image.png').write_bytes(b'changed-local-original')
-        with self.assertRaises(VaultError):
-            self.service.media(plan['id'], image['id'], True)
-        original, _, _ = self.service.media(plan['id'], image['id'])
-        self.assertEqual(hashlib.sha256(original.read_bytes()).hexdigest(), image['sha256'])
-        self.assertEqual((self.source / 'Trip' / 'image.png').read_bytes(), b'changed-local-original')
-
-    def test_missing_local_original_downloads_verified_version(self):
-        plan = self.make_saved()
-        image = next(i for i in plan['items'] if i['name'] == 'image.png')
-        (self.source / 'Trip' / 'image.png').unlink()
         calls = []
         def download(key, version, target):
             calls.append((key, version))
             target.write_bytes(self.cloud.objects[key])
         self.cloud.download = download
-        with self.assertRaises(VaultError):
-            self.service.media(plan['id'], image['id'], True)
-        self.assertEqual(calls, [])
-        path, _, _ = self.service.media(plan['id'], image['id'])
-        self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), image['sha256'])
-        self.assertEqual(calls, [(image['objectKey'], 'v1')])
-        self.service.media(plan['id'], image['id'])
-        self.assertEqual(len(calls), 1)
+        for thumbnail in (True, False, True):
+            path, _, _ = self.service.media(plan['id'], item['id'], thumbnail)
+            self.service.release_media(path)
+            self.assertFalse(path.exists())
+        self.assertEqual([c[0] for c in calls], [item['thumbnailKey'], item['objectKey'], item['thumbnailKey']])
+        self.assertEqual((self.source / 'Trip' / 'image.png').read_bytes(), b'changed-local-original')
+        self.assertFalse((self.service.root / 'view-cache').exists())
 
-    def test_preview_uses_only_verified_cache_preserves_alpha_and_never_downloads(self):
+    def test_missing_local_original_downloads_verified_version(self):
+        plan = self.make_saved()
+        item = next(i for i in plan['items'] if i['name'] == 'image.png')
+        (self.source / 'Trip' / 'image.png').unlink()
+        with patch.object(self.cloud, 'download', wraps=self.cloud.download) as download:
+            path, _, _ = self.service.media(plan['id'], item['id'])
+            self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), item['sha256'])
+            self.assertEqual(download.call_args.args[:2], (item['objectKey'], 'v1'))
+            self.service.release_media(path)
+        self.assertEqual(list(self.service.root.glob('viewing-*')), [])
+
+    def test_private_thumbnail_preserves_alpha_and_size_without_metadata(self):
         from PIL import Image
-        Image.new('RGBA', (640, 240), (40, 80, 120, 96)).save(self.source / 'Trip' / 'image.png')
+        image = Image.new('RGBA', (640, 240), (40, 80, 120, 96))
+        image.save(self.source / 'Trip' / 'image.png')
         plan = self.scan()
         self.service.upload(plan['id'])
         plan = self.service.read(plan['id'])
         item = next(i for i in plan['items'] if i['name'] == 'image.png')
         with patch.object(self.cloud, 'download', wraps=self.cloud.download) as download:
-            with self.assertRaises(VaultError):
-                self.service.media(plan['id'], item['id'], True)
-            download.assert_not_called()
-            original, _, _ = self.service.media(plan['id'], item['id'])
-            before = original.read_bytes()
             preview, mime, _ = self.service.media(plan['id'], item['id'], True)
-            self.assertEqual(download.call_count, 1)
+            self.assertEqual(download.call_args.args[0], item['thumbnailKey'])
             self.assertEqual(mime, 'image/png')
+            self.assertLessEqual(preview.stat().st_size, 50_000)
             with Image.open(preview) as image:
                 self.assertEqual(image.size, (320, 120))
                 self.assertEqual(image.getpixel((0, 0))[3], 96)
-            self.assertEqual(original.read_bytes(), before)
-            self.service.media(plan['id'], item['id'], True)
-            self.assertEqual(download.call_count, 1)
+                self.assertNotIn('exif', image.info)
+            self.service.release_media(preview)
 
-    def test_preview_rejects_corrupt_cache_without_fetching_original(self):
+    def test_corrupt_thumbnail_is_rejected_and_temporary_files_removed(self):
         plan = self.make_saved()
         item = next(i for i in plan['items'] if i['name'] == 'image.png')
-        original, _, _ = self.service.media(plan['id'], item['id'])
-        original.write_bytes(b'wrong')
-        with patch.object(self.cloud, 'download') as download:
-            with self.assertRaises(VaultError):
-                self.service.media(plan['id'], item['id'], True)
-            download.assert_not_called()
-        self.assertEqual(list((self.service.root / 'view-cache').glob('*.thumbnail.png')), [])
-        self.assertEqual(list((self.service.root / 'view-cache').glob('*.pending')), [])
+        self.cloud.download = lambda key, version, target: target.write_bytes(b'wrong')
+        with self.assertRaises(VaultError):
+            self.service.media(plan['id'], item['id'], True)
+        self.assertEqual(list(self.service.root.glob('viewing-*')), [])
+
+    def test_missing_thumbnail_never_downloads_original_for_grid(self):
+        plan = self.make_saved()
+        raw = self.service.read(plan['id'])
+        item = next(i for i in raw['items'] if i['name'] == 'image.png')
+        del item['thumbnailKey']
+        self.service.save(raw)
+        with patch.object(self.cloud, 'download') as download, self.assertRaises(VaultError):
+            self.service.media(plan['id'], item['id'], True)
+        download.assert_not_called()
+
+    def test_legacy_cleanup_preserves_inputs_and_unidentified_files(self):
+        plan = self.make_saved()
+        item = next(i for i in plan['items'] if i['name'] == 'image.png')
+        cache = self.service.root / 'view-cache'
+        cache.mkdir()
+        (cache / (item['sha256'] + '.original')).write_bytes(self.cloud.objects[item['objectKey']])
+        (cache / (item['sha256'] + '.thumbnail.png')).write_bytes(b'old-preview')
+        (cache / 'unidentified.original').write_bytes(b'keep')
+        original = (self.source / 'Trip' / 'image.png').read_bytes()
+        self.assertEqual(self.service.purge_legacy_view_cache(), 2)
+        self.assertEqual((self.source / 'Trip' / 'image.png').read_bytes(), original)
+        self.assertEqual((cache / 'unidentified.original').read_bytes(), b'keep')
+
+    def test_thumbnail_is_bounded_and_strips_exif(self):
+        from PIL import Image
+        import random
+        image = Image.frombytes('RGB', (640, 480), random.Random(42).randbytes(640 * 480 * 3))
+        exif = Image.Exif(); exif[271] = 'private-camera'
+        image.save(self.source / 'Trip' / 'image.png', exif=exif)
+        plan = self.scan(); self.service.upload(plan['id'])
+        item = next(i for i in self.service.read(plan['id'])['items'] if i['name'] == 'image.png')
+        self.assertLessEqual(len(self.cloud.objects[item['thumbnailKey']]), 50_000)
+        preview, _, _ = self.service.media(plan['id'], item['id'], True)
+        with Image.open(preview) as decoded:
+            self.assertFalse(decoded.getexif())
+        self.service.release_media(preview)
+
+    def test_video_poster_is_created_locally_when_ffmpeg_is_available(self):
+        import shutil
+        import subprocess
+        ffmpeg = shutil.which('ffmpeg')
+        if not ffmpeg:
+            self.skipTest('ffmpeg is not installed')
+        source = self.source / 'movie.MP4'
+        subprocess.run([ffmpeg, '-v', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=64x64:d=0.3',
+                        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-y', str(source)],
+                       check=True, capture_output=True, timeout=15)
+        plan = self.scan(); self.service.upload(plan['id'])
+        item = next(i for i in self.service.read(plan['id'])['items'] if i['name'] == 'movie.MP4')
+        self.assertIn('thumbnailKey', item)
+        self.assertLessEqual(len(self.cloud.objects[item['thumbnailKey']]), 50_000)
+        self.assertEqual(source.read_bytes(), self.cloud.objects[item['objectKey']])
+
+    def test_backfill_is_conditional_and_does_not_reupload_original(self):
+        plan = self.make_saved()
+        raw = self.service.read(plan['id'])
+        for item in raw['items']:
+            for field in ('thumbnailKey', 'thumbnailSHA256', 'thumbnailVersionId'):
+                item.pop(field, None)
+        self.service.save(raw)
+        key = f'media-hub/catalogs/{plan["rootId"]}/{plan["id"]}.json'
+        manifest = json.loads(self.cloud.objects[key])
+        for item in manifest['items']:
+            for field in ('thumbnailKey', 'thumbnailSHA256', 'thumbnailVersionId'):
+                item.pop(field, None)
+        self.cloud.objects[key] = json.dumps(manifest).encode()
+        originals = {k: v for k, v in self.cloud.objects.items() if '/originals/' in k}
+        before = len(self.cloud.puts)
+        result = self.service.publish_thumbnails(plan['id'])
+        self.assertEqual(result['thumbnails'], 1)
+        self.assertEqual(self.cloud.puts[before:], [key])
+        self.assertEqual(originals, {k: v for k, v in self.cloud.objects.items() if '/originals/' in k})
+        self.service.publish_thumbnails(plan['id'])
+        self.assertEqual(len(self.cloud.puts), before + 1)
 
     def test_uncommitted_or_wrong_item_is_not_accessible(self):
         plan = self.scan()
@@ -327,6 +444,7 @@ class CloudLibraryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 206)
         self.assertEqual(len(response.content), 10)
         self.assertIn('no-store', response.headers['cache-control'])
+        self.assertEqual(list(service.root.glob('viewing-*')), [])
         self.assertEqual(client.get(url, headers={'host': 'evil.invalid'}).status_code, 403)
 
 

@@ -97,6 +97,21 @@ class ReaderTests(unittest.TestCase):
         self.fake.value['items'][0]['objectKey'] = 'another-app/private-file'
         self.assertEqual(self.call(f'/catalogs/{ROOT}/{UPLOAD}/items/{ITEM}/url')['statusCode'], 400)
         self.assertEqual(self.fake.signed, [])
+
+    def test_private_thumbnail_requires_owner_and_folder_unlock(self):
+        key = f'media-hub/thumbnails/{ITEM}/{SHA}.png'
+        self.fake.value['items'][0]['thumbnailKey'] = key
+        endpoint = f'/catalogs/{ROOT}/{UPLOAD}/items/{ITEM}/url'
+        self.assertEqual(self.call(endpoint, owner=None, query={'role': 'thumbnail'})['statusCode'], 401)
+        self.fake.settings['locks'] = [folder_security.make_lock(ROOT, FOLDER, '012345')]
+        self.assertEqual(self.call(endpoint, query={'role': 'thumbnail'})['statusCode'], 404)
+        self.assertEqual(self.fake.signed, [])
+        token = json.loads(self.call('/folder-unlock', method='POST', body={'password': '012345'})['body'])['token']
+        self.assertEqual(self.call(endpoint, query={'role': 'thumbnail'}, headers={'X-Folder-Unlock': token})['statusCode'], 200)
+        params = self.fake.signed[-1][1]
+        self.assertEqual(params['Params']['Key'], key)
+        self.assertEqual(params['Params']['ResponseCacheControl'], 'private, no-store')
+        self.assertEqual(params['ExpiresIn'], 300)
     def test_invalid_folder_tree_denied(self):
         self.fake.value['folders'].append({'id': ROOT, 'name': 'cycle', 'parentId': ROOT})
         self.assertEqual(self.call(f'/catalogs/{ROOT}/{UPLOAD}')['statusCode'], 400)
@@ -106,3 +121,32 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(response['statusCode'], 502)
         self.assertNotIn('SECRET', response['body'])
         self.assertNotIn('signed.url', response['body'])
+
+    def test_trash_excludes_items_and_denies_original_and_thumbnail_urls(self):
+        self.fake.value['trash'] = [{'id': OWNER, 'name': 'sample', 'state': 'trashed', 'itemIds': [ITEM], 'folderIds': []}]
+        self.assertEqual(json.loads(self.call()['body'])[0]['itemCount'], 0)
+        self.assertEqual(json.loads(self.call(f'/catalogs/{ROOT}/{UPLOAD}')['body'])['items'], [])
+        for role in ('original', 'thumbnail'):
+            self.assertEqual(self.call(f'/catalogs/{ROOT}/{UPLOAD}/items/{ITEM}/url', query={'role': role})['statusCode'], 404)
+        self.assertEqual(self.fake.signed, [])
+
+    def test_trashed_root_hidden_and_malformed_trash_fails_closed(self):
+        self.fake.value['trash'] = [{'id': OWNER, 'name': 'Demo', 'state': 'deleting', 'itemIds': [ITEM], 'folderIds': [FOLDER]}]
+        self.assertEqual(json.loads(self.call()['body']), [])
+        self.assertEqual(self.call(f'/catalogs/{ROOT}/{UPLOAD}')['statusCode'], 404)
+        self.fake.value['trash'][0]['state'] = 'bad'
+        self.assertEqual(self.call()['statusCode'], 400)
+        self.assertEqual(self.fake.signed, [])
+
+    def test_catalog_creation_rank_does_not_resurrect_old_upload_on_edit(self):
+        old_upload = OWNER
+        old = dict(self.fake.value, id=old_upload, catalogCreatedAt=1)
+        new = dict(self.fake.value, catalogCreatedAt=2)
+        def fetch(**args):
+            if args['Key'] == folder_security.KEY:
+                return {'Body': io.BytesIO(json.dumps(self.fake.settings).encode())}
+            return {'Body': io.BytesIO(json.dumps(old if old_upload in args['Key'] else new).encode())}
+        with patch.object(self.fake, 'get_object', side_effect=fetch), patch.object(self.fake, 'list_objects_v2', return_value={'Contents': [
+            {'Key': f'media-hub/catalogs/{ROOT}/{old_upload}.json', 'LastModified': 99},
+            {'Key': f'media-hub/catalogs/{ROOT}/{UPLOAD}.json', 'LastModified': 2}]}):
+            self.assertEqual(json.loads(self.call()['body'])[0]['id'], UPLOAD)

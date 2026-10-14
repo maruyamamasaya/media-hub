@@ -58,6 +58,30 @@ Resources:
             Method: POST
             Auth:
               AuthorizationScopes: [openid]
+        EncryptedLibrary:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /encrypted-library
+            Method: GET
+            Auth:
+              AuthorizationScopes: [openid]
+        EncryptedCatalog:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /encrypted-catalogs/{key}/{upload}/url
+            Method: GET
+            Auth:
+              AuthorizationScopes: [openid]
+        EncryptedObject:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /encrypted-objects/{key}/{upload}/{object}/url
+            Method: GET
+            Auth:
+              AuthorizationScopes: [openid]
         Library:
           Type: HttpApi
           Properties:
@@ -102,13 +126,15 @@ Resources:
                 Resource: !Sub 'arn:aws:s3:::${BucketName}'
                 Condition:
                   StringEquals:
-                    s3:prefix: 'media-hub/catalogs/'
+                    s3:prefix: ['media-hub/catalogs/', 'media-hub/encrypted-catalogs/']
               - Effect: Allow
                 Action: ['s3:GetObject', 's3:GetObjectVersion']
                 Resource:
                   - !Sub 'arn:aws:s3:::${BucketName}/media-hub/catalogs/*'
                   - !Sub 'arn:aws:s3:::${BucketName}/media-hub/originals/*'
                   - !Sub 'arn:aws:s3:::${BucketName}/media-hub/thumbnails/*'
+                  - !Sub 'arn:aws:s3:::${BucketName}/media-hub/encrypted-catalogs/*'
+                  - !Sub 'arn:aws:s3:::${BucketName}/media-hub/encrypted-objects/*'
                   - !Sub 'arn:aws:s3:::${BucketName}/media-hub/folder-locks/settings.json'
               - Effect: Allow
                 Action: ['logs:CreateLogStream', 'logs:PutLogEvents']

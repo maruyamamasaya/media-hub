@@ -27,6 +27,10 @@ photo-hub/
 追加配置: `web/`が素材UI、`local-api/vault/`がローカルAPI・サービス・DB・保存、`contracts/`が共通仕様、`Sources/AssetLibraryContract/`が生成Swift DTOと取得クライアント、`Tests/AssetLibraryContractTests/`がMacで実行する契約テスト。開発素材・DBはGit除外の `.local/`。
 
 ## Data Flow
+暗号化用は独立したEncryptedUploads → 同梱MediaHubCrypto（CryptoKit・鍵はstdinのみ） → encrypted-objects／encrypted-catalogsの非公開S3 → 本人限定GET URL → 共通SealedRangeReader／AVAssetResourceLoaderで必要断片をメモリ復号。鍵はKeychain、復旧ファイルはPBKDF2＋AES-GCM。[暗号化構成](docs/ENCRYPTED-UPLOAD.md)。
+
+現行S3閲覧: Macの確認済み入力 → 原本と最大50KBのサムネイルを非公開S3へ → カタログ登録 → Macの認証付きローカルAPI／iPhoneの本人・フォルダ認可＋5分署名GET → 表示メモリ。Macの転送用ファイルは応答完了、原本表示用ファイルは閲覧終了で破棄し、長期閲覧キャッシュは作成しない。[小画像保管方針](decisions/0015-private-thumbnails-no-durable-cache.md)。
+
 Web: ファイル選択/テストフォルダ → ImportJob/Itemとstaging → 原本照合 → Asset/File登録 → 派生生成。Browser → API → SQLiteの検索/整理 → StorageのFile IDによる画像配信。派生失敗でも原本を保持する。削除はごみ箱から完全削除、deletingを起動時に再試行する。
 
 以下は既存iOSの経路で、新Webの3ファイル必須条件ではない。
@@ -99,3 +103,5 @@ Macの手動軽量動画作成はLightVideoMaker→ループバックlight-video
 
 ## マイショートと動画
 WebはMyShort→既存一覧APIのsort=random/seed→display File配信。安定したハッシュ順位を既存カーソルに結び付け、メタデータを20件ずつ取得する。動画は原本保管後、任意FFmpegでJPEG thumbnailとH.264/AAC MP4 displayを生成し、失敗を原本から独立して記録する。iOS旧PhotoはAVFoundationでポスターとplayback.mp4を生成し、開発用保存では追加キーを照合転送する。AWS動画転送は拒否する。DB/共通DTOの構造変更はない。[仕様と制限](docs/MY-SHORT.md)。
+
+S3のごみ箱は各カタログのtrash記録で管理し、共通のcatalog_trashが通常一覧・取得URLを除外する。Mac管理APIがETag条件付き保存と照合後に正確な原本／小画像キーの全版を削除し、失敗時はdeleting記録を維持する。小さな管理履歴は保持する。[操作と制限](docs/S3-TRASH.md)。

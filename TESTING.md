@@ -8,7 +8,7 @@ SQLite・キー・バックアップ・転送・キャッシュはSwift Package�
 ## Mac SwiftUI / Web Validation
 現行Mac版は `sh scripts/verify-desktop.sh`。契約・文書・ローカルAPI・backend・Swift全テスト・開発用.appビルドを確認する。SwiftのRuntimeTestsは一時領域で認証拒否、同じ領域の二重起動拒否、終了・再起動を実子プロセスで検証し、AWSへアクセスしない。loopback bindが可能な実行環境が必要。
 
-Macのタイル変更では、容量非表示・タイトル10pt・正方形、ファイルクリック、左右ボタンと矢印キー、先頭/末尾、連続移動、Escで一覧復帰を確認。閲覧済み原本だけからの小画像生成・透過保持・破損キャッシュ拒否はCloudLibraryTestsで検証する。
+Macのタイル変更では、容量非表示・タイトル10pt・正方形、ファイルクリック、左右ボタンと矢印キー、先頭/末尾、連続移動、Escで一覧復帰を確認。CloudLibraryTestsで非公開S3小画像取得・50KB上限・透過／縦横比・EXIF除去・破損拒否・応答後一時ファイル削除・条件付き追加と原本不変更を検証する。ReaderTestsで本人・フォルダ解除なしの小画像URL拒否とprivate/no-store・5分署名を確認する。
 
 Mac画面・操作・配布の未確認項目は [Mac SwiftUI](docs/MAC-SWIFTUI.md)。Windowsアプリ対応は終了し、Electron検証は旧試作用。以下のWeb検証は開発用として保持。
 
@@ -17,6 +17,12 @@ Mac画面・操作・配布の未確認項目は [Mac SwiftUI](docs/MAC-SWIFTUI.
 個別入口: `.venv/Scripts/python.exe -m unittest discover -s local-api/tests -v`、`.venv/Scripts/python.exe scripts/generate-contracts.py --check`、webで `npm.cmd run build`。実ブラウザは登録→詳細→整理→検索→ダウンロード→ごみ箱→復元。完全削除と容量不足は隔離テストで確認。390px幅はWebレスポンシブ確認だけ。
 
 性能は `.venv/Scripts/python.exe scripts/benchmark-library.py`。生成64×64 PNG 1,000件を隔離DBへ実登録し、60件API一覧・検索・全ページ重複なしを検証。初期目標は同検証PCでAPI中央値1秒以内。結果は `.local/benchmarks/latest.json`、要約はsessions。実画像の描画・スクロールやiOS性能とは別。
+
+## 暗号化送信と閲覧
+
+`verify-desktop.sh`はMacと暗号化helperを先にビルドし、Pythonの暗号化専用転送テストを省略せず実行する。`test_encrypted_upload.py`で通常履歴との分離・ciphertextのみの送信・原本保持・鍵の非保存・違う鍵による再開拒否・再送抑止・API境界を検証。`test_encrypted_reader.py`は本人認証・不正キー拒否・版固定・5分署名・no-storeを確認。`SealedMediaTests`は復旧ファイル／PBKDF2、AES-GCMの改ざん・順序・ID・鍵の結び付け、境界をまたぐ復号と合成動画のAVAsset読込を検証。
+
+実AWSの合成素材検証は明示実行時だけ`MEDIA_HUB_SEALED_FIXTURE`を指定して`testAWSInteroperabilityWhenFixtureIsProvided`を実行する。通常検証では1件skipであり、実AWS検証の成功を代替しない。テスト用鍵・素材だけで実署名Range GETを復号し、作成した正確な版だけを除去する。本人の鍵作成・復旧パスワード入力・実素材の送信は本人が操作する。
 
 ## Fast Validation
 アーカイブ変更では、個別切り替え→通常一覧から除外→アーカイブ表示→原本取得→通常へ戻す、選択一括操作、コレクション全体操作、保管状態を指定した検索をブラウザで確認する。DB移行、再起動保持、所属と原本ハッシュ保持、ごみ箱復元、revision/token競合と全件ロールバック、ページ上限を超えるコレクション操作は隔離APIテストで検証する。
@@ -83,3 +89,5 @@ S3接続ツールの隔離テスト: `python3 -m unittest discover -s scripts/te
 Web/API標準検証後、`npm.cmd run short-smoke --prefix desktop`で隔離Chromium試験を実行する。合成WebMを派生出力の代わりに配置し、空、重複なし/戻る、ホイール連続、キーリピート抑止、タッチイベント、整理、詳細、動画ミュート/停止、原本を取得しないことを確認する。実FFmpeg変換は別途、対応動画を追加してJPEG thumbnail/MP4 display、変換失敗、ハッシュ一致、再生成、範囲取得を確認する。
 
 iOSではMacでSwift全テスト・iOS Build・IntegrationTests（動画失敗保全と開発用動画保存/復元の追加テスト）を実行し、実機で画像/動画取り込み、縦スワイプ、前へ、アルバム、詳細、タブ/背景で停止、音声、原本保存、復元後の派生だけの取得を確認する。AVFoundation実変換・Dynamic Type・VoiceOver・キャッシュ削除中の再生は未検証。[仕様](docs/MY-SHORT.md)。
+
+S3ごみ箱は `local-api/tests/test_cloud_trash.py` と `backend/tests/test_reader.py`。個別／複数／フォルダ／空フォルダ、復元、原本保持、全版と削除マーカー、正確なキー限定、共有参照拒否、条件付き保存競合、途中失敗・再起動後の手動再試行、鍵解除前の非表示・操作拒否、旧履歴操作による最新版巻き戻り防止を確認する。実AWSの削除試験は専用の合成ファイルだけを使う。本人の素材は試験で削除しない。[操作](docs/S3-TRASH.md)。

@@ -48,9 +48,12 @@ struct FolderScreen: View {
     @EnvironmentObject var model: MacModel
     let plan: FolderUpload
     let folderID: String?
+    @State private var selecting = false
+    @State private var selectedItems: Set<String> = []
+    @State private var trashFolder: String?
+    @State private var confirmingTrash = false
     @State private var locking = false
     @State private var selection: GallerySelection?
-    @State private var previewRevision = 0
     private var folders: [MediaFolder] { plan.folders.filter { $0.parentId == folderID } }
     private var files: [FolderUploadItem] { plan.items.filter { $0.folderId == folderID } }
     var body: some View {
@@ -59,22 +62,44 @@ struct FolderScreen: View {
                 ForEach(folders, id: \.id) { folder in
                     NavigationLink(value: "\(plan.id):\(folder.id)") { FolderTile(name: folder.name) }
                         .buttonStyle(.plain)
+                        .contextMenu { Button("フォルダをごみ箱へ", role: .destructive) { trashFolder = folder.id; confirmingTrash = true } }
                 }
                 ForEach(files, id: \.id) { item in
-                    Button { selection = GallerySelection(id: item.id) } label: {
+                    Button {
+                        if selecting {
+                            if selectedItems.contains(item.id) { selectedItems.remove(item.id) } else { selectedItems.insert(item.id) }
+                        } else { selection = GallerySelection(id: item.id) }
+                    } label: {
                         SquareTile(title: item.name) {
-                            MediaThumbnail(plan: plan, item: item, revision: previewRevision)
+                            MediaThumbnail(plan: plan, item: item)
                         }
                     }.buttonStyle(.plain)
+                    .overlay(alignment: .topTrailing) {
+                        if selecting { Image(systemName: selectedItems.contains(item.id) ? "checkmark.circle.fill" : "circle").font(.title2).padding(8).foregroundStyle(Color.accentColor).allowsHitTesting(false) }
+                    }
+                    .contextMenu { Button("ごみ箱へ", role: .destructive) { selectedItems = [item.id]; trashFolder = nil; confirmingTrash = true } }
                 }
             }.padding(20)
             if folders.isEmpty && files.isEmpty { Text("このフォルダは空です。").foregroundStyle(.secondary).padding(40) }
             Text(plan.folders.first(where: { $0.id == folderID })?.isLocked == true ? "このフォルダ：鍵あり・解除中" : "このフォルダ自身：鍵なし（親に鍵がある場合は親の保護が適用されます）")
                 .font(.caption).foregroundStyle(.secondary).padding(.bottom, 12)
         }.navigationTitle(plan.folders.first { $0.id == folderID }?.name ?? plan.name)
-        .toolbar { if folderID != nil { Button("フォルダの鍵を確認・設定", systemImage: "lock") { locking = true } } }
+        .toolbar {
+            Button(selecting ? "選択を終了" : "選択") { selecting.toggle(); selectedItems = [] }
+            if selecting {
+                Button("選択した\(selectedItems.count)件をごみ箱へ", systemImage: "trash") { trashFolder = nil; confirmingTrash = true }.disabled(selectedItems.isEmpty || model.busy)
+            }
+            Button("このフォルダをごみ箱へ", systemImage: "trash") { trashFolder = folderID; confirmingTrash = true }.disabled(folderID == nil || model.busy)
+            if folderID != nil { Button("フォルダの鍵を確認・設定", systemImage: "lock") { locking = true } }
+        }
+        .confirmationDialog("S3の対象をごみ箱へ移しますか？", isPresented: $confirmingTrash, titleVisibility: .visible) {
+            Button("ごみ箱へ移す", role: .destructive) {
+                let ids = Array(selectedItems), folder = trashFolder
+                Task { await model.run { try await model.moveToTrash(plan: plan.id, items: folder == nil ? ids : [], folder: folder); selectedItems = []; selecting = false } }
+            }
+        } message: { Text("Macの元ファイルは保持します。ごみ箱から復元できます。") }
         .sheet(isPresented: $locking) { FolderPasswordSheet(plan: plan.id, folder: folderID, folderLocked: plan.folders.first(where: { $0.id == folderID })?.isLocked == true) }
-        .sheet(item: $selection, onDismiss: { previewRevision += 1 }) { selected in
+        .sheet(item: $selection) { selected in
             MediaGallery(plan: plan, items: files, initialID: selected.id)
         }
     }
@@ -83,7 +108,6 @@ struct MediaThumbnail: View {
     @EnvironmentObject var model: MacModel
     let plan: FolderUpload
     let item: FolderUploadItem
-    let revision: Int
     @State private var image: NSImage?
     var body: some View {
         Group {
@@ -94,11 +118,14 @@ struct MediaThumbnail: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .task(id: revision) {
+        .task {
             let identity = model.privacyID
-            guard !isVideo(item.name) else { return }
-            if let data = try? await model.runtime.bytes("/folder-library/\(plan.id)/items/\(item.id)/content?thumbnail=true"),
-               !Task.isCancelled, identity == model.privacyID { image = NSImage(data: data) }
+            do {
+                let data = try await model.runtime.bytes("/folder-library/\(plan.id)/items/\(item.id)/content?thumbnail=true")
+                if !Task.isCancelled, identity == model.privacyID { image = NSImage(data: data) }
+            } catch {
+                if identity == model.privacyID, case MacAPIError.awsLoginRequired = error { model.handle(error) }
+            }
         }.onDisappear { image = nil }
     }
 }

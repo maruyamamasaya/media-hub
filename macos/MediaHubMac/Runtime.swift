@@ -120,13 +120,15 @@ final class MacRuntime: ObservableObject {
     }
     func download(_ path: String) async throws -> URL {
         let (file, response) = try await network.download(for: makeRequest(path))
-        do { try Self.validate(response, data: nil); return file }
+        let errorData = (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } == false ? try? Data(contentsOf: file) : nil
+        do { try Self.validate(response, data: errorData); return file }
         catch { try? FileManager.default.removeItem(at: file); throw error }
     }
     static func validate(_ response: URLResponse, data: Data?) throws {
         guard let response = response as? HTTPURLResponse else { throw MacAPIError.invalidResponse }
         guard (200..<300).contains(response.statusCode) else {
             if let data, let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let detail = (value["message"] ?? value["detail"]) as? String {
+                if value["code"] as? String == "aws_login_required" { throw MacAPIError.awsLoginRequired }
                 throw MacAPIError.message(detail)
             }
             throw MacAPIError.message("操作に失敗しました（\(response.statusCode)）。接続と本人認証を確認してください。")
@@ -148,11 +150,12 @@ final class MacRuntime: ObservableObject {
     }
 }
 enum MacAPIError: LocalizedError {
-    case unavailable, invalidResponse, message(String)
+    case unavailable, invalidResponse, awsLoginRequired, message(String)
     var errorDescription: String? {
         switch self {
         case .unavailable: return "処理の起動を待ってください。"
         case .invalidResponse: return "処理からの応答を確認できません。"
+        case .awsLoginRequired: return "AWSへの再ログインが必要です。ログイン後に接続を確認してください。"
         case .message(let value): return value
         }
     }

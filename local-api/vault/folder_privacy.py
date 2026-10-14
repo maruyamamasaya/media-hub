@@ -57,7 +57,9 @@ class FolderPrivacy:
         results = []
         for summary in self.uploads.library():
             plan = self.uploads.read(summary['id'])
-            value = self.visible(plan, settings, token)
+            import catalog_trash
+            active = catalog_trash.active(plan)
+            value = self.visible(active, settings, token) if active is not None else None
             if value is not None:
                 value['byteSize'] = sum(item['byteSize'] for item in value['items'])
                 if len(value['folders']) != len(plan['folders']):
