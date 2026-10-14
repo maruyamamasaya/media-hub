@@ -78,3 +78,8 @@ S3接続ツールの隔離テスト: `python3 -m unittest discover -s scripts/te
 フォルダロック: backend/tests/test_folder_security.py・test_reader.py、local-api/tests/test_folder_privacy.py。親子継承、名前／件数／派生／URL非表示、owner・期限・revisionのトークン制限、共有設定不正時拒否、条件付き保存、原本非変更、HttpOnly cookie再ロックを確認。模擬S3の既存テストパスワードで画面の解除・期限後再ロックを確認。新しい本人パスワードの設定・確定と実iPhone解除は本人が実施する。
 
 本人ログイン継続: iOS IntegrationTestsの `testStoredLoginRefreshAndFailurePreserveKeychainUntilLogout` は模擬保存領域・URLProtocolでtoken復帰、一時失敗後の再試行、期限切れ分類、明示ログアウトを検証。署名なしSimulatorの実Keychain操作はerrSecMissingEntitlementで実行不可。実機Keychain継承と再起動時の自動復帰は本人端末で確認する。
+
+## マイショートの追加検証
+Web/API標準検証後、`npm.cmd run short-smoke --prefix desktop`で隔離Chromium試験を実行する。合成WebMを派生出力の代わりに配置し、空、重複なし/戻る、ホイール連続、キーリピート抑止、タッチイベント、整理、詳細、動画ミュート/停止、原本を取得しないことを確認する。実FFmpeg変換は別途、対応動画を追加してJPEG thumbnail/MP4 display、変換失敗、ハッシュ一致、再生成、範囲取得を確認する。
+
+iOSではMacでSwift全テスト・iOS Build・IntegrationTests（動画失敗保全と開発用動画保存/復元の追加テスト）を実行し、実機で画像/動画取り込み、縦スワイプ、前へ、アルバム、詳細、タブ/背景で停止、音声、原本保存、復元後の派生だけの取得を確認する。AVFoundation実変換・Dynamic Type・VoiceOver・キャッシュ削除中の再生は未検証。[仕様](docs/MY-SHORT.md)。

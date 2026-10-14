@@ -96,3 +96,6 @@ S3フォルダ閲覧はCloudFoldersと `/api/v1/folder-library`。最新の保�
 Macの手動軽量動画作成はLightVideoMaker→ループバックlight-videos API→ffprobe/ffmpeg。原本を読み、アプリデータ内の派生作業領域へ保存する。AWS通信は行わない。構成・保持と承認境界は [動画配信](docs/VIDEO-DELIVERY.md)。
 
 フォルダロックは非公開S3の管理JSONをMacが条件付き更新し、本人閲覧LambdaとMac APIが同じPBKDF2・HMAC認可処理で未解除の階層を除外する。iPhoneは解除APIとGETのみで設定を書かない。詳細は [フォルダロック](docs/FOLDER-LOCK.md)。
+
+## マイショートと動画
+WebはMyShort→既存一覧APIのsort=random/seed→display File配信。安定したハッシュ順位を既存カーソルに結び付け、メタデータを20件ずつ取得する。動画は原本保管後、任意FFmpegでJPEG thumbnailとH.264/AAC MP4 displayを生成し、失敗を原本から独立して記録する。iOS旧PhotoはAVFoundationでポスターとplayback.mp4を生成し、開発用保存では追加キーを照合転送する。AWS動画転送は拒否する。DB/共通DTOの構造変更はない。[仕様と制限](docs/MY-SHORT.md)。

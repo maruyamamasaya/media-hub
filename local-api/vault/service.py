@@ -4,6 +4,8 @@ import json
 import threading
 import uuid
 import warnings
+import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,6 +15,7 @@ from .storage import AssetStorage, checksum
 
 MAX_BYTES = 100 * 1024 * 1024
 LIBRARY_ID = 'local-library'
+VIDEO_MIMES = {'.mp4': 'video/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm', '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo', '.m4v': 'video/mp4'}
 MIMES = {'JPEG': 'image/jpeg', 'PNG': 'image/png', 'WEBP': 'image/webp'}
 
 
@@ -113,6 +116,18 @@ class Vault:
     def inspect(self, path, filename):
         if not path.stat().st_size:
             raise VaultError('corrupt', '空のファイルです。')
+        suffix = Path(filename).suffix.lower()
+        if suffix in VIDEO_MIMES:
+            width = height = None
+            probe = shutil.which('ffprobe')
+            if probe:
+                try:
+                    result = subprocess.run([probe, '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'json', str(path)], capture_output=True, check=True, timeout=15)
+                    stream = json.loads(result.stdout)['streams'][0]
+                    width, height = int(stream['width']), int(stream['height'])
+                except (OSError, subprocess.SubprocessError, ValueError, KeyError, IndexError):
+                    pass  # An unreadable/unsupported video is still retained as an original.
+            return VIDEO_MIMES[suffix], width, height
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter('error', Image.DecompressionBombWarning)
@@ -167,7 +182,7 @@ class Vault:
                     raise VaultError('integrity', '原本の照合に失敗しました。')
                 timestamp = now()
                 with self.repo.connect() as db:
-                    db.execute('INSERT INTO assets(id,libraryId,kind,name,createdAt,updatedAt,originalExtension) VALUES (?,?,?,?,?,?,?)', (asset_id, LIBRARY_ID, 'image', Path(item['filename']).stem, timestamp, timestamp, Path(item['filename']).suffix.lower().lstrip('.')))
+                    db.execute('INSERT INTO assets(id,libraryId,kind,name,createdAt,updatedAt,originalExtension) VALUES (?,?,?,?,?,?,?)', (asset_id, LIBRARY_ID, 'video' if mime.startswith('video/') else 'image', Path(item['filename']).stem, timestamp, timestamp, Path(item['filename']).suffix.lower().lstrip('.')))
                     db.execute('INSERT INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', (file_id, asset_id, 'original', item['filename'], key, mime, path.stat().st_size, sha, width, height, 'ready', None))
                     db.execute("UPDATE assets SET storageLocation='local',originalOwnership=?,originalModifiedNs=? WHERE id=?", ('reference' if item['referenceKey'] else 'managed', self.storage.path(key).stat().st_mtime_ns, asset_id))
                     db.execute("UPDATE import_items SET state='ready',code=NULL,message='追加しました。' WHERE id=?", (item_id,))
@@ -181,6 +196,8 @@ class Vault:
         original = next(f for f in asset['files'] if f['role'] == 'original')
         if original['state'] != 'ready':
             raise VaultError('missing_file', original['error'] or '原本が見つかりません。', 409)
+        if original['mimeType'].startswith('video/'):
+            return self.video_preview(asset, original)
         for role, dimension in [('thumbnail', 512), ('display', 2048)]:
             with self.repo.connect() as db:
                 previous = db.execute('SELECT id,objectKey FROM files WHERE assetId=? AND role=?', (asset_id, role)).fetchone()
@@ -205,6 +222,39 @@ class Vault:
             with self.repo.connect() as db:
                 db.execute('INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', info)
         return self.asset(asset_id)
+
+    def video_preview(self, asset, original):
+        # Each derived file has its own ID; conversion never writes to the original.
+        executable = shutil.which('ffmpeg')
+        for role, suffix, mime in [('thumbnail', 'jpg', 'image/jpeg'), ('display', 'mp4', 'video/mp4')]:
+            with self.repo.connect() as db:
+                previous = db.execute('SELECT id,objectKey FROM files WHERE assetId=? AND role=?', (asset['id'], role)).fetchone()
+            file_id = previous['id'] if previous else identifier()
+            key = previous['objectKey'] if previous else f"libraries/{LIBRARY_ID}/assets/{asset['id']}/files/{file_id}"
+            target = self.staging.path(f'{file_id}.{suffix}')
+            width = height = None
+            try:
+                if not executable:
+                    raise ValueError('FFmpegが未導入のため閲覧用動画を生成できません。原本は保管されています。')
+                command = [executable, '-nostdin', '-v', 'error', '-y', '-i', str(self.storage.path(original['objectKey']))]
+                if role == 'thumbnail':
+                    command += ['-frames:v', '1', '-vf', 'scale=512:512:force_original_aspect_ratio=decrease']
+                else:
+                    command += ['-map', '0:v:0', '-map', '0:a:0?', '-vf', "scale=1280:1280:force_original_aspect_ratio=decrease:force_divisible_by=2", '-c:v', 'libx264', '-preset', 'fast', '-crf', '28', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart']
+                subprocess.run(command + [str(target)], check=True, timeout=180, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if role == 'thumbnail':
+                    with Image.open(target) as image:
+                        width, height = image.size
+                self.storage.put(target, key)
+                info = (file_id, asset['id'], role, f'{role}.{suffix}', key, mime, target.stat().st_size, checksum(target), width, height, 'ready', None)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                message = str(exc) if isinstance(exc, ValueError) else '動画の変換に失敗しました。原本は保管されています。'
+                info = (file_id, asset['id'], role, f'{role}.{suffix}', key, mime, 0, '', None, None, 'failed', message)
+            finally:
+                target.unlink(missing_ok=True)
+            with self.repo.connect() as db:
+                db.execute('INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', info)
+        return self.asset(asset['id'])
 
     def recover(self):
         with self.lock:
@@ -287,7 +337,7 @@ class Vault:
             relocated = set()
             candidates = 0
             for path in folder.rglob('*'):
-                if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(folder) or path.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.webp', '.heic', '.heif'):
+                if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(folder) or path.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.webp', '.heic', '.heif', *VIDEO_MIMES):
                     continue
                 relative = path.relative_to(folder).as_posix()
                 observed.add(relative)
@@ -423,7 +473,7 @@ class Vault:
             job_id = self.new_job()
             added = 0
             for path in self.local_directory.rglob('*'):
-                if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(self.local_directory.resolve()) or path.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.webp', '.heic', '.heif'):
+                if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(self.local_directory.resolve()) or path.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.webp', '.heic', '.heif', *VIDEO_MIMES):
                     continue
                 key = path.relative_to(self.storage.root).as_posix()
                 # Registered files are not re-added, including modified/missing references.
@@ -438,16 +488,18 @@ class Vault:
                         break
             return self.job(job_id)
 
-    def list_assets(self, q='', view='all', kind='', collection='', sort='added', limit=60, cursor=None, tag_ids=None, extensions=None, order=None, archive='normal', location='all'):
+    def list_assets(self, q='', view='all', kind='', collection='', sort='added', limit=60, cursor=None, tag_ids=None, extensions=None, order=None, archive='normal', location='all', seed=''):
         if location not in ('all', 'local', 'development-remote'):
             raise VaultError('invalid_request', '保管場所が不正です。')
-        if view not in ('all', 'favorites', 'archive', 'trash') or archive not in ('normal', 'archived', 'all') or sort not in ('added', 'name', 'captured', 'updated', 'size') or kind not in ('', 'image', 'photo') or order not in (None, 'asc', 'desc'):
+        if view not in ('all', 'favorites', 'archive', 'trash') or archive not in ('normal', 'archived', 'all') or sort not in ('added', 'name', 'captured', 'updated', 'size', 'random') or kind not in ('', 'image', 'photo', 'video') or order not in (None, 'asc', 'desc'):
             raise VaultError('invalid_request', '一覧条件が不正です。')
+        if len(seed) > 128 or (sort == 'random' and not seed):
+            raise VaultError('invalid_request', 'ランダム表示にはセッション識別子が必要です。')
         tag_ids = sorted(set(tag_ids or []))
         extensions = sorted(set(e.lower().lstrip('.') for e in (extensions or [])))
         if len(tag_ids) > 100 or len(extensions) > 100:
             raise VaultError('invalid_request', 'Too many filters')
-        signature = hashlib.sha256(json.dumps([q, view, kind, collection, sort, tag_ids, extensions, order, archive, location]).encode()).hexdigest()
+        signature = hashlib.sha256(json.dumps([q, view, kind, collection, sort, tag_ids, extensions, order, archive, location, seed]).encode()).hexdigest()
         last = None
         if cursor:
             try:
@@ -481,7 +533,7 @@ class Vault:
             conditions.append("(a.name LIKE ? ESCAPE '\\' OR a.note LIKE ? ESCAPE '\\' OR EXISTS(SELECT 1 FROM files f WHERE f.assetId=a.id AND f.originalFilename LIKE ? ESCAPE '\\') OR EXISTS(SELECT 1 FROM tags t JOIN asset_tags m ON t.id=m.itemId WHERE m.assetId=a.id AND t.name LIKE ? ESCAPE '\\'))")
             params.extend([term] * 4)
         where = ' AND '.join(conditions)
-        expression = {'name': 'a.name COLLATE NOCASE', 'captured': "COALESCE(a.capturedAt,'')", 'updated': 'a.updatedAt', 'size': "COALESCE((SELECT f.byteSize FROM files f WHERE f.assetId=a.id AND f.role='original'),0)", 'added': 'a.createdAt'}[sort]
+        expression = {'name': 'a.name COLLATE NOCASE', 'captured': "COALESCE(a.capturedAt,'')", 'updated': 'a.updatedAt', 'size': "COALESCE((SELECT f.byteSize FROM files f WHERE f.assetId=a.id AND f.role='original'),0)", 'added': 'a.createdAt', 'random': 'session_rank(a.id)'}[sort]
         ascending = order == 'asc' or (order is None and sort == 'name')
         direction, comparison = ('ASC', '>') if ascending else ('DESC', '<')
         page_where, page_params = where, list(params)
@@ -489,6 +541,7 @@ class Vault:
             page_where += f' AND ({expression}, a.id) {comparison} (?,?)'
             page_params.extend(last)
         with self.repo.connect() as db:
+            db.create_function('session_rank', 1, lambda asset_id: hashlib.sha256((seed + asset_id).encode()).hexdigest(), deterministic=True)
             total = db.execute(f'SELECT COUNT(*) FROM assets a WHERE {where}', params).fetchone()[0]
             rows = db.execute(f'SELECT a.id,{expression} AS sortValue FROM assets a WHERE {page_where} ORDER BY {expression} {direction},a.id {direction} LIMIT ?', (*page_params, limit + 1)).fetchall()
         more = len(rows) > limit
@@ -610,8 +663,8 @@ class Vault:
                     value = changes[field]
                     if not isinstance(value, str) or (field != 'note' and not value.strip()) or len(value) > (5000 if field == 'note' else 255):
                         raise VaultError('invalid_request', '入力文字数または内容が不正です。')
-                    if field == 'kind' and value not in ('image', 'photo'):
-                        raise VaultError('invalid_request', '初期版は写真・画像に対応しています。')
+                    if field == 'kind' and value not in ('image', 'photo', 'video'):
+                        raise VaultError('invalid_request', '写真・画像・動画の種別を指定してください。')
                     db.execute(f'UPDATE assets SET {field}=? WHERE id=?', (value.strip(), asset_id))
             if 'favorite' in changes:
                 if type(changes['favorite']) is not bool:
@@ -678,4 +731,4 @@ class Vault:
             size = db.execute('SELECT COALESCE(SUM(byteSize),0) FROM files').fetchone()[0]
             size += db.execute('SELECT COALESCE(SUM(f.byteSize),0) FROM files f JOIN remote_originals r ON r.fileId=f.id WHERE r.objectKey!=f.objectKey').fetchone()[0]
             local_count = db.execute("SELECT COUNT(*) FROM assets WHERE trashedAt IS NULL AND storageLocation='local'").fetchone()[0]
-        return {'mode': 'local', 'storageMode': 'development-hybrid', 'localDirectory': str(self.local_directory), 'localCount': local_count, 'remoteCount': count - local_count, 'assetCount': count, 'normalCount': count - archived, 'archiveCount': archived, 'byteSize': size, 'formats': ['JPEG', 'PNG', 'WebP', 'HEIC（原本のみ）']}
+        return {'mode': 'local', 'storageMode': 'development-hybrid', 'localDirectory': str(self.local_directory), 'localCount': local_count, 'remoteCount': count - local_count, 'assetCount': count, 'normalCount': count - archived, 'archiveCount': archived, 'byteSize': size, 'formats': ['JPEG', 'PNG', 'WebP', 'HEIC（原本のみ）', 'MP4 / MOV / WebM / MKV / AVI / M4V（閲覧用生成にはFFmpegが必要）']}

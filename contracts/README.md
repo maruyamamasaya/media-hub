@@ -1,7 +1,7 @@
 # Asset Library API v1
 正本はasset.schema.json。`python scripts/generate-contracts.py`でWeb型と独立したSwift DTOを生成し、`--check`でずれを検出する。文字列kind/role/stateは未知値でもデコードできる。日時はUTC ISO8601文字列、nullableはJSON null、サイズ・revisionは整数。既存PhotoHubCore.Photoと別モデル。
 
-APIは `/api/v1`。GET /assetsはq、view（all/favorites/archive/trash）、archive（normal/archived/all）、kind、collection、sort（added/name/captured/updated/size）、order（asc/desc）、tag（複数指定・全タグ一致）、extension（複数指定・いずれか一致）、limit（1–100）、cursorを受けAssetPageを返す。cursorは検索条件に結び付け、条件が変われば破棄する。
+APIは `/api/v1`。GET /assetsはq、view（all/favorites/archive/trash）、archive（normal/archived/all）、kind、collection、sort（added/name/captured/updated/size/random）、order（asc/desc）、tag（複数指定・全タグ一致）、extension（複数指定・いずれか一致）、limit（1–100）、cursorを受けAssetPageを返す。cursorは検索条件に結び付け、条件が変われば破棄する。
 
 POST /importsはmultipart files、GET /imports/{id}はImportJob、POST /imports/{id}/retryは保持済み失敗項目だけ再処理。POST /fixture-importsは設定済みテストフォルダを取り込む。GET /assets/{id}はAsset。PATCH /assets/{id}はrevisionとname/note/kind/favorite/tagIds/collectionIdsの任意変更を受ける。未知フィールドは拒否する。
 
@@ -46,3 +46,5 @@ Mac手動アップロード: `MediaFolder`・`FolderUploadItem`・`FolderUpload`
 S3フォルダ閲覧: `GET /folder-library`はroot単位の最新保存完了FolderUpload一覧。`GET /folder-library/{planId}/items/{itemId}/content`は照合した原本（thumbnail=trueでMac原本由来の派生、download=trueで添付）。未完了カタログの原本は取得不可。
 
 本人専用クラウド読取: ReadRoot/ReadCatalog/ReadItem/ReadURLが `/library` と `/catalogs/{root}/{upload}`、登録item用GET URLのDTO。署名URLはカタログに含めず、明示取得時の短いレスポンスだけに含む。iOSには書き込みAPIがない。
+
+マイショートはsort=randomとseed（1–128文字）を指定。seedはcursorの条件にも含む。同じseedとAsset IDから安定したランダム順位を生成する。kindにvideoを追加。動画displayは閲覧用video/mp4、thumbnailはimage/jpeg、生成不能はfailedとerrorを返す。既存の文字列型契約を維持する。[動画仕様](../docs/MY-SHORT.md)。

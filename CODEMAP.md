@@ -2,6 +2,7 @@
 
 | Feature | Primary paths | Search keywords / Key entry points | Related tests |
 | --- | --- | --- | --- |
+| マイショート・動画 | `web/src/MyShort.tsx`, `local-api/vault/service.py`, `ios/PhotoHub/Views.swift`, `PhotoImporter.swift`, `LibraryModel.swift` | `MyShort`, `session_rank`, `video_preview`, `MyShortView`, `ShortVideo`, `videoDerivatives`, `loadPlayback` | `local-api/tests/test_my_short.py`, `desktop/short-smoke.cjs`, `IntegrationTests`（iOS未実行） |
 | Web画面 | `web/src/App.tsx`, `AssetDetail.tsx`, `Modal.tsx`, `api.ts` | `App`, `upload`, `retryImports`, `AssetDetail`, `fileUrl` | Web build、ブラウザ一連操作 |
 | Mac SwiftUI | `macos/MediaHubMac/App.swift`, `Runtime.swift`, `Model.swift`, `Views.swift`, `Gallery.swift` | `MacRuntime`, `MacModel`, `MediaHubMacApp`, `relock`, `SquareTile`, `MediaGallery` | `Tests/MediaHubMacTests/RuntimeTests.swift`, `scripts/verify-desktop.sh` |
 | Macアプリアイコン | `macos/Assets/AppIcon.png`, `AppIcon.icns`, `scripts/build-mac-icon.sh`, `build-mac-app.sh` | `CFBundleIconFile`, `iconutil` | ICNSサイズ・透過・同梱照合、署名、Finder実表示 |

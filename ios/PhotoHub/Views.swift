@@ -2,6 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 import PhotosUI
 import Photos
+import AVKit
 import PhotoHubCore
 
 struct RootView: View {
@@ -9,6 +10,7 @@ struct RootView: View {
     var body: some View {
         TabView {
             NavigationStack { PhotoGrid() }.tabItem { Label("写真", systemImage: "photo.on.rectangle") }
+            NavigationStack { MyShortView() }.tabItem { Label("マイショート", systemImage: "play.rectangle") }
             NavigationStack { AlbumsView() }.tabItem { Label("アルバム", systemImage: "rectangle.stack") }
             NavigationStack { SettingsView() }.tabItem { Label("設定", systemImage: "gearshape") }
         }
@@ -98,7 +100,7 @@ struct PhotoGrid: View {
                     .frame(minWidth: 44, minHeight: 44)
             }.accessibilityLabel("フィルターと並び替え")
             if album == nil {
-                PhotosPicker(selection: $selection, maxSelectionCount: 100, matching: .images, preferredItemEncoding: .current, photoLibrary: .shared()) { Image(systemName: "plus") }.disabled(library.busy)
+                PhotosPicker(selection: $selection, maxSelectionCount: 100, matching: .any(of: [.images, .videos]), preferredItemEncoding: .current, photoLibrary: .shared()) { Image(systemName: "plus") }.disabled(library.busy)
             }
         }
         .sheet(isPresented: $listSettings) {
@@ -220,7 +222,7 @@ struct PhotoDetail: View {
     var body: some View {
         VStack(spacing: 0) {
             TabView(selection: $current) {
-                ForEach(photoIDs, id: \.self) { id in if let photo = library.photos.first(where: { $0.id == id }) { DetailImage(photo: photo).tag(id) } }
+                ForEach(photoIDs, id: \.self) { id in if let photo = library.photos.first(where: { $0.id == id }) { Group { if photo.mime.hasPrefix("video/") { ShortVideo(photo: photo, active: current == id) } else { DetailImage(photo: photo) } }.tag(id) } }
             }.tabViewStyle(.page(indexDisplayMode: .never))
             if let photo {
                 VStack(spacing: 5) {
@@ -338,5 +340,150 @@ struct FolderSettingsView: View {
             case .failure(let error): library.message = error.localizedDescription
             }
         }
+    }
+}
+
+// Legacy Photo library integration. Web metadata synchronization is a separate step.
+struct MyShortView: View {
+    @EnvironmentObject var library: LibraryModel
+    @State private var order: [String] = []
+    @State private var currentID = ""
+    @State private var albumID = ""
+    @State private var detail = false
+    @State private var visible = false
+    @State private var lastMove = Date.distantPast
+    private var ids: [String] {
+        order.filter { id in library.photos.contains { $0.id == id && $0.state != .deleting }
+            && (albumID.isEmpty || library.members.contains { $0.photoID == id && $0.albumID == albumID }) }
+    }
+    private var photo: Photo? { library.photos.first { $0.id == currentID && $0.state != .deleting } }
+    private var index: Int { ids.firstIndex(of: currentID) ?? 0 }
+    private func reset() {
+        order = library.photos.filter { $0.state != .deleting }.map(\.id).shuffled()
+        currentID = ids.first ?? ""
+    }
+    private func move(_ direction: Int) {
+        guard Date().timeIntervalSince(lastMove) > 0.35 else { return }
+        let next = index + direction
+        guard ids.indices.contains(next) else { return }
+        lastMove = Date(); currentID = ids[next]
+    }
+    var body: some View {
+        VStack(spacing: 12) {
+            Picker("アルバム", selection: $albumID) {
+                Text("すべての素材").tag("")
+                ForEach(library.albums) { Text($0.name).tag($0.id) }
+            }.pickerStyle(.menu)
+            if let photo {
+                GeometryReader { geometry in
+                    Group {
+                        if photo.mime.hasPrefix("video/") { ShortVideo(photo: photo, active: visible && !detail) }
+                        else { DetailImage(photo: photo) }
+                    }
+                    .id(photo.id)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(DragGesture(minimumDistance: 60).onEnded { gesture in
+                        if abs(gesture.translation.height) > abs(gesture.translation.width) { move(gesture.translation.height < 0 ? 1 : -1) }
+                    })
+                }
+                Text(photo.filename).lineLimit(1)
+                Text("\(index + 1) / \(ids.count)").font(.caption)
+                HStack {
+                    Button("前へ") { move(-1) }.disabled(index == 0)
+                    Button("次へ") { move(1) }.disabled(index + 1 >= ids.count)
+                    Button { library.setFavorite(photo) } label: { Image(systemName: photo.favorite ? "heart.fill" : "heart") }.accessibilityLabel(photo.favorite ? "お気に入り解除" : "お気に入り")
+                    Menu {
+                        ForEach(library.albums) { album in
+                            Button { library.toggleMembership(photo: photo, album: album) } label: {
+                                Label(album.name, systemImage: library.members.contains { $0.photoID == photo.id && $0.albumID == album.id } ? "checkmark" : "plus")
+                            }
+                        }
+                    } label: { Image(systemName: "rectangle.stack.badge.plus") }.accessibilityLabel("アルバムに追加")
+                    Button("詳細") { detail = true }
+                }.disabled(library.busy)
+            } else {
+                ContentUnavailableView("対象の素材がありません", systemImage: "photo", description: Text("写真タブから画像・動画を追加するか、アルバムを変えてください。"))
+            }
+            Button("新しい順で見る") { reset() }
+        }
+        .padding().navigationTitle("マイショート")
+        .onAppear { visible = true; if order.isEmpty { reset() } }
+        .onDisappear { visible = false }
+        .onChange(of: albumID) { _, _ in reset() }
+        .onChange(of: ids) { _, updated in if !updated.contains(currentID) { currentID = updated.first ?? "" } }
+        .sheet(isPresented: $detail) { NavigationStack {
+            PhotoDetail(initialID: currentID, photoIDs: [currentID])
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("閉じる") { detail = false } } }
+        } }
+    }
+}
+
+@MainActor
+final class ShortPlayback: ObservableObject {
+    @Published var player: AVPlayer?
+    @Published var failed = false
+    @Published var loading = true
+    private var observation: NSKeyValueObservation?
+    func open(_ url: URL) {
+        stop(); failed = false; loading = true
+        let item = AVPlayerItem(url: url)
+        player = AVPlayer(playerItem: item); player?.isMuted = true
+        observation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+            let status = item.status
+            Task { @MainActor [weak self] in
+                guard let self, self.player?.currentItem === item else { return }
+                self.loading = status == .unknown
+                if status == .failed { self.failed = true; self.player?.pause() }
+            }
+        }
+    }
+    func stop() { player?.pause(); player?.replaceCurrentItem(with: nil); player = nil; observation = nil }
+}
+
+@MainActor
+struct ShortVideo: View {
+    @EnvironmentObject var library: LibraryModel
+    @Environment(\.scenePhase) private var scenePhase
+    let photo: Photo
+    let active: Bool
+    @StateObject private var playback = ShortPlayback()
+    @State private var shown = false
+    @State private var muted = true
+    @State private var fetching = false
+    @State private var attempts = 0
+    private func sync() {
+        if active && shown && scenePhase == .active {
+            if playback.player == nil, let url = library.playbackURL(photo) { playback.open(url); muted = true }
+            playback.player?.play()
+        } else { playback.player?.pause() }
+    }
+    var body: some View {
+        VStack {
+            if let player = playback.player, !playback.failed {
+                VideoPlayer(player: player).overlay { if playback.loading { ProgressView("読み込み中…") } }
+                HStack {
+                    Button("再生") { if active && scenePhase == .active { player.play() } }
+                    Button("停止") { player.pause() }
+                    Button(muted ? "音声オン" : "ミュート") { muted.toggle(); player.isMuted = muted }
+                }
+            } else if fetching { ProgressView("動画を読み込んでいます…") }
+            else {
+                ContentUnavailableView("動画を再生できません", systemImage: "video.slash", description: Text(photo.error ?? "閲覧用動画がありません。原本は詳細から明示的に保存できます。"))
+                Button("再試行") { playback.stop(); attempts += 1 }
+            }
+        }
+        .onAppear { shown = true; sync() }
+        .task(id: "\(photo.id)-\(active)-\(attempts)") {
+            guard active, playback.player == nil else { return }
+            fetching = true
+            let file = await library.loadPlayback(photo)
+            guard !Task.isCancelled else { fetching = false; return }
+            if let file, shown, scenePhase == .active { playback.open(file); muted = true; playback.player?.play() }
+            fetching = false
+        }
+        .onDisappear { shown = false; playback.stop() }
+        .onChange(of: active) { _, _ in sync() }
+        .onChange(of: scenePhase) { _, _ in sync() }
     }
 }

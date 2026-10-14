@@ -59,3 +59,6 @@ Lambdaは `BUCKET` と `OWNER_SUB` が必須。JWTはAPI Gatewayが検証、Lamb
 `.gitignore`で.env、開発データ、Xcode個人設定を除外する。サンプルにも秘密値を記載しない。
 
 MacのS3手動アップロードは「設定 → S3フォルダアップロード」。操作・上限・料金・中断復旧は [手動フォルダアップロード](docs/MANUAL-FOLDER-UPLOAD.md)。元フォルダを保持し、自動同期しない。AWS接続先は確認画面で指定し、送信前に対象と保存先への明示確認が必要。
+
+## マイショートの動画
+Web/Windowsの閲覧用動画生成には、APIを起動する環境のPATHにFFmpeg（任意、ffprobeで寸法取得）が必要。自動導入・同梱はしない。未導入でも原本保管は可能。導入後はAPI再起動と詳細のプレビュー再生成を行う。[対応形式・キャッシュ・iOSとの違い](docs/MY-SHORT.md)。

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Download, Heart, RotateCcw, Trash2, ImageOff, RefreshCw, Archive, Settings, Upload } from 'lucide-react';
 import type { Asset, Tag, Collection, ArchiveRequest, TransferRequest } from './generated/contracts';
 import { api, bytes, fileUrl } from './api';
@@ -7,6 +7,13 @@ import { Modal } from './Modal';
 interface Props { asset: Asset; tags: Tag[]; collections: Collection[]; onClose: () => void; onChanged: (asset?: Asset) => void; onTagCreated: (tag: Tag) => void; }
 
 export function AssetDetail({ asset: initial, tags, collections, onClose, onChanged, onTagCreated }: Props) {
+  const video = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    const element = video.current;
+    const stopHidden = () => { if (document.hidden) element?.pause(); };
+    document.addEventListener('visibilitychange', stopHidden);
+    return () => { element?.pause(); document.removeEventListener('visibilitychange', stopHidden); };
+  }, []);
   const [asset, setAsset] = useState(initial);
   const [name, setName] = useState(initial.name);
   const [note, setNote] = useState(initial.note);
@@ -62,7 +69,7 @@ export function AssetDetail({ asset: initial, tags, collections, onClose, onChan
     <div className="detail-layout">
       <div className="detail-visual">
         <div className={`preview-canvas checkerboard ${viewMode}`}>
-        {shownFile && !imageBroken ? <img style={{imageRendering: pixelated ? 'pixelated' : 'auto', ...(viewMode !== 'fit' ? {width: (shownFile.width ?? 0) * scale || undefined, height: (shownFile.height ?? 0) * scale || undefined} : {})}} src={fileUrl(asset, shownFile)} alt={asset.name} onError={() => setImageBroken(true)} /> : <div className="preview-placeholder"><ImageOff size={36} /><p>プレビューを表示できません</p><span>原本はダウンロードして確認できます。</span></div>}
+        {shownFile?.mimeType.startsWith('video/') && !imageBroken ? <video ref={video} src={fileUrl(asset, shownFile)} controls muted playsInline preload="metadata" style={{maxWidth: '100%', maxHeight: '100%'}} onError={() => setImageBroken(true)} /> : shownFile && !imageBroken ? <img style={{imageRendering: pixelated ? 'pixelated' : 'auto', ...(viewMode !== 'fit' ? {width: (shownFile.width ?? 0) * scale || undefined, height: (shownFile.height ?? 0) * scale || undefined} : {})}} src={fileUrl(asset, shownFile)} alt={asset.name} onError={() => setImageBroken(true)} /> : <div className="preview-placeholder"><ImageOff size={36} /><p>プレビューを表示できません</p><span>原本はダウンロードして確認できます。</span></div>}
         </div>
         <div className="preview-controls"><button className="secondary" aria-pressed={viewMode === 'fit'} onClick={() => setViewMode('fit')}>全体</button><button className="secondary" aria-pressed={viewMode === 'actual'} onClick={() => setViewMode('actual')}>原寸</button><button className="secondary" aria-pressed={viewMode === 'zoom'} onClick={() => setViewMode('zoom')}>4倍</button><label><input type="checkbox" checked={pixelated} onChange={e => setPixelated(e.target.checked)} />ドットを鮮明に</label></div>
         <div className="visual-bottom"><span>{original?.mimeType.replace('image/', '').toUpperCase()}</span><span>{original?.width ? `${original.width} × ${original.height}` : '画素数不明'}</span></div>
@@ -75,7 +82,7 @@ export function AssetDetail({ asset: initial, tags, collections, onClose, onChan
         {error ? <div className="error-box" role="alert">{error}<button onClick={reload} disabled={busy}>最新の情報を読み込む</button></div> : null}
         <form onSubmit={event => { event.preventDefault(); action(() => api<Asset>(`/assets/${asset.id}`, 'PATCH', { revision: asset.revision, name, note, kind, tagIds, collectionIds })); }}>
           <label>名前<input value={name} maxLength={255} required onChange={e => setName(e.target.value)} /></label>
-          <label>種別<select value={kind} onChange={e => setKind(e.target.value)}><option value="image">画像</option><option value="photo">写真</option></select></label>
+          <label>種別<select value={kind} onChange={e => setKind(e.target.value)}><option value="image">画像</option><option value="photo">写真</option><option value="video">動画</option></select></label>
           <label>メモ<textarea rows={3} value={note} maxLength={5000} placeholder="用途やアイデアを書き留める" onChange={e => setNote(e.target.value)} /></label>
           <fieldset><legend>タグ</legend><div className="tag-options">{tags.map(tag => <label className={tagIds.includes(tag.id) ? 'check-chip selected' : 'check-chip'} key={tag.id}><input type="checkbox" checked={tagIds.includes(tag.id)} onChange={() => setTagIds(toggle(tagIds, tag.id))} />{tag.name}</label>)}{!tags.length ? <span className="muted">まだタグがありません</span> : null}</div></fieldset>
           <div className="inline-input"><input aria-label="新しいタグ" placeholder="新しいタグ" value={newTag} maxLength={100} onChange={e => setNewTag(e.target.value)} /><button type="button" className="secondary" disabled={busy || !newTag.trim()} onClick={addTag}>追加</button></div>
