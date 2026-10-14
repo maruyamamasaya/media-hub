@@ -19,8 +19,8 @@ Resources:
     Properties:
       StageName: '$default'
       DefaultRouteSettings:
-        ThrottlingBurstLimit: 5
-        ThrottlingRateLimit: 2
+        ThrottlingBurstLimit: 10
+        ThrottlingRateLimit: 20
       RouteSettings:
         'POST /folder-unlock':
           ThrottlingBurstLimit: 1
@@ -50,6 +50,14 @@ Resources:
           BUCKET: !Ref BucketName
           OWNER_SUB: !Ref OwnerSub
       Events:
+        Usage:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /usage
+            Method: GET
+            Auth:
+              AuthorizationScopes: [openid]
         FolderUnlock:
           Type: HttpApi
           Properties:
@@ -136,6 +144,7 @@ Resources:
                   - !Sub 'arn:aws:s3:::${BucketName}/media-hub/encrypted-catalogs/*'
                   - !Sub 'arn:aws:s3:::${BucketName}/media-hub/encrypted-objects/*'
                   - !Sub 'arn:aws:s3:::${BucketName}/media-hub/folder-locks/settings.json'
+                  - !Sub 'arn:aws:s3:::${BucketName}/media-hub/usage/latest.json'
               - Effect: Allow
                 Action: ['logs:CreateLogStream', 'logs:PutLogEvents']
                 Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-reader:*'

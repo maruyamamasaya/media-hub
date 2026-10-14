@@ -64,7 +64,20 @@ public struct HiddenPagePINSheet: View {
     @State private var busy = false
     @State private var error = ""
     private let open: @MainActor (String) async -> Void
-    public init(open: @escaping @MainActor (String) async -> Void) { self.open = open }
+    private let beginKeychainInteraction: @MainActor () -> Void
+    private let endKeychainInteraction: @MainActor () async -> Void
+    public init(beginKeychainInteraction: @escaping @MainActor () -> Void = {}, endKeychainInteraction: @escaping @MainActor () async -> Void = {}, open: @escaping @MainActor (String) async -> Void) {
+        self.beginKeychainInteraction = beginKeychainInteraction
+        self.endKeychainInteraction = endKeychainInteraction
+        self.open = open
+    }
+    @MainActor
+    private func keychain<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
+        beginKeychainInteraction()
+        let result = await Task.detached { Result { try work() } }.value
+        await endKeychainInteraction()
+        return try result.get()
+    }
     public var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("隠したフォルダを開く").font(.title2)
@@ -80,7 +93,7 @@ public struct HiddenPagePINSheet: View {
                     .disabled(configured == nil || busy || !HiddenPagePIN.valid(pin) || (configured == false && pin != confirmation))
             }.disabled(busy)
         }.padding(24).frame(maxWidth: 440)
-            .task { do { configured = try HiddenPagePIN.configured() } catch { self.error = error.localizedDescription } }
+            .task { do { configured = try await keychain { try HiddenPagePIN.configured() } } catch { self.error = error.localizedDescription } }
             .interactiveDismissDisabled(busy)
     }
     private func submit() {
@@ -88,7 +101,7 @@ public struct HiddenPagePINSheet: View {
         pin = ""; confirmation = ""; busy = true; error = ""
         Task {
             do {
-                try await Task.detached { if creating { try HiddenPagePIN.create(entered) } else { try HiddenPagePIN.verify(entered) } }.value
+                try await keychain { if creating { try HiddenPagePIN.create(entered) } else { try HiddenPagePIN.verify(entered) } }
                 await open(entered); dismiss()
             } catch { self.error = error.localizedDescription }
             busy = false

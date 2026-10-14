@@ -16,6 +16,7 @@ from .light_video import LightVideos
 from .encrypted_upload import EncryptedUploads
 from .folder_privacy import FolderPrivacy
 from .cloud_trash import CloudTrash
+from .usage import Usage
 
 ROOT = Path(__file__).resolve().parents[2]
 ALLOWED_ORIGINS = {'http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:8765', 'http://localhost:8765'}
@@ -44,6 +45,11 @@ def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_ori
         return request.headers.get('x-folder-unlock', '') or request.cookies.get('folder_grant', '')
     light_videos = LightVideos(vault.root)
     app.state.light_videos = light_videos
+    usage = Usage(vault.root)
+    app.state.usage = usage
+    folder_uploads.client_factory = usage.client
+    encrypted.uploads.client_factory = usage.client
+    usage.client_factory = usage.client
 
     @app.middleware('http')
     async def local_boundary(request, call_next):
@@ -65,6 +71,7 @@ def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_ori
             or request.url.path.startswith('/api/v1/folder-library')
             or request.url.path.startswith('/api/v1/light-videos')
             or request.url.path.startswith('/api/v1/folder-locks')
+            or request.url.path in ('/api/v1/usage', '/api/v1/usage/refresh', '/api/v1/usage/activity')
         ):
             return JSONResponse({'code': 'cloud_only', 'message': '原本はS3で管理します。ローカルライブラリ機能は終了しました。'}, status_code=410)
         try:
@@ -100,6 +107,18 @@ def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_ori
     def status():
         return vault.status()
 
+    @app.post('/api/v1/usage')
+    def usage_cached(body: dict):
+        return usage.cached(body)
+
+    @app.post('/api/v1/usage/refresh')
+    def usage_refresh(body: dict):
+        return usage.refresh(body)
+
+    @app.post('/api/v1/usage/activity')
+    def usage_activity(body: dict):
+        return usage.activity(body)
+
     @app.get('/api/v1/folder-uploads')
     def folder_upload_list(request: Request):
         return privacy.plans(folder_grant(request)) if privacy_enabled else folder_uploads.list()
@@ -107,6 +126,20 @@ def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_ori
     @app.get('/api/v1/encrypted-uploads')
     def encrypted_list():
         return encrypted.list()
+
+    @app.post('/api/v1/encrypted-uploads/queue')
+    def encrypted_queue(body: dict):
+        if 'planIds' not in body:
+            raise VaultError('invalid_request', 'フォルダを指定してください。')
+        return encrypted.start_queue(body['planIds'], {k: v for k, v in body.items() if k != 'planIds'})
+
+    @app.post('/api/v1/encrypted-uploads/scan-jobs')
+    def encrypted_scan_job(body: dict):
+        return encrypted.uploads.begin_scan(body, encrypted.scan)
+
+    @app.get('/api/v1/encrypted-uploads/scan-jobs/{job_id}')
+    def encrypted_scan_status(job_id: str):
+        return encrypted.uploads.scan_status(job_id)
 
     @app.post('/api/v1/encrypted-uploads/scan')
     def encrypted_scan(body: dict):
@@ -231,6 +264,36 @@ def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_ori
         if privacy_enabled:
             privacy.require_full_plan(plan_id, folder_grant(request))
         return folder_uploads.publish_thumbnails(plan_id)
+
+    @app.post('/api/v1/folder-uploads/queue')
+    def folder_queue(body: dict, request: Request):
+        if 'planIds' not in body or not isinstance(body['planIds'], list):
+            raise VaultError('invalid_request', 'フォルダを指定してください。')
+        if privacy_enabled:
+            for plan_id in body['planIds']:
+                privacy.require_full_plan(plan_id, folder_grant(request))
+        return folder_uploads.start_queue(body['planIds'], {k: v for k, v in body.items() if k != 'planIds'})
+
+    @app.post('/api/v1/folder-uploads/scan-jobs')
+    def folder_scan_job(body: dict, request: Request):
+        token = folder_grant(request)
+        if privacy_enabled and isinstance(body.get('path'), str):
+            source = str(Path(body['path']).expanduser().resolve())
+            for summary in folder_uploads.list():
+                raw = folder_uploads.read(summary['id'])
+                if (raw.get('sourceRoot') == source and raw['bucket'] == body.get('bucket') and
+                        raw['region'] == body.get('region')):
+                    privacy.require_full_plan(raw['id'], token)
+        def scan(body, progress=None):
+            result = folder_uploads.scan(body, progress=progress)
+            if privacy_enabled:
+                privacy.require_full_plan(result['id'], token)
+            return result
+        return folder_uploads.begin_scan(body, scan)
+
+    @app.get('/api/v1/folder-uploads/scan-jobs/{job_id}')
+    def folder_scan_status(job_id: str):
+        return folder_uploads.scan_status(job_id)
 
     @app.post('/api/v1/folder-uploads/scan')
     def folder_upload_scan(body: dict, request: Request):

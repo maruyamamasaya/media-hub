@@ -686,6 +686,9 @@
           "items": {
             "$ref": "#/$defs/FolderUploadItem"
           }
+        },
+        "progress": {
+          "$ref": "#/$defs/UploadProgress"
         }
       }
     },
@@ -1033,6 +1036,183 @@
           }
         },
         "folderIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "UploadProgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "name",
+        "bytes",
+        "totalBytes",
+        "remainingSeconds",
+        "activeFiles"
+      ],
+      "properties": {
+        "phase": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "bytes": {
+          "type": "integer"
+        },
+        "totalBytes": {
+          "type": "integer"
+        },
+        "remainingSeconds": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "activeFiles": {
+          "type": "integer"
+        }
+      }
+    },
+    "UsagePoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "date",
+        "storageBytes",
+        "storageEstimateYen"
+      ],
+      "properties": {
+        "date": {
+          "type": "string"
+        },
+        "storageBytes": {
+          "type": "integer"
+        },
+        "storageEstimateYen": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
+    "UsageBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "limitUSD",
+        "actualUSD",
+        "forecastUSD",
+        "notificationCount",
+        "recipientCount"
+      ],
+      "properties": {
+        "limitUSD": {
+          "type": "number"
+        },
+        "actualUSD": {
+          "type": "number"
+        },
+        "forecastUSD": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "notificationCount": {
+          "type": "integer"
+        },
+        "recipientCount": {
+          "type": "integer"
+        }
+      }
+    },
+    "UsageReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "updatedAt",
+        "region",
+        "storageBytes",
+        "currentBytes",
+        "previousBytes",
+        "normalBytes",
+        "encryptedBytes",
+        "thumbnailBytes",
+        "metadataBytes",
+        "storageEstimateYen",
+        "targetYen",
+        "exchangeRate",
+        "taxMultiplier",
+        "rateUSDPerGiB",
+        "history",
+        "notes"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "type": "integer"
+        },
+        "updatedAt": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        },
+        "storageBytes": {
+          "type": "integer"
+        },
+        "currentBytes": {
+          "type": "integer"
+        },
+        "previousBytes": {
+          "type": "integer"
+        },
+        "normalBytes": {
+          "type": "integer"
+        },
+        "encryptedBytes": {
+          "type": "integer"
+        },
+        "thumbnailBytes": {
+          "type": "integer"
+        },
+        "metadataBytes": {
+          "type": "integer"
+        },
+        "storageEstimateYen": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "targetYen": {
+          "type": "number"
+        },
+        "exchangeRate": {
+          "type": "number"
+        },
+        "taxMultiplier": {
+          "type": "number"
+        },
+        "rateUSDPerGiB": {
+          "type": "number"
+        },
+        "history": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UsagePoint"
+          }
+        },
+        "budget": {
+          "$ref": "#/$defs/UsageBudget"
+        },
+        "notes": {
           "type": "array",
           "items": {
             "type": "string"

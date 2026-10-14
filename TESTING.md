@@ -20,6 +20,8 @@ Mac画面・操作・配布の未確認項目は [Mac SwiftUI](docs/MAC-SWIFTUI.
 
 ## 暗号化送信と閲覧
 
+アップロード改善は `local-api/tests/test_upload_improvements.py` で非同期確認・最大2件並列・予約順・停止／失敗後の残り停止・分割SHA-256・断片再開／期限切れ・再起動後の暗号文同一性と原本保持を検証する。実AWSのmultipartと実素材の速度は別途確認。[仕様](docs/UPLOAD-IMPROVEMENTS.md)。
+
 `verify-desktop.sh`はMacと暗号化helperを先にビルドし、Pythonの暗号化専用転送テストを省略せず実行する。`test_encrypted_upload.py`で通常履歴との分離・ciphertextのみの送信・原本保持・鍵の非保存・違う鍵による再開拒否・再送抑止・API境界を検証。`test_encrypted_reader.py`は本人認証・不正キー拒否・版固定・5分署名・no-storeを確認。`SealedMediaTests`は復旧ファイル／PBKDF2、AES-GCMの改ざん・順序・ID・鍵の結び付け、境界をまたぐ復号と合成動画のAVAsset読込を検証。
 
 実AWSの合成素材検証は明示実行時だけ`MEDIA_HUB_SEALED_FIXTURE`を指定して`testAWSInteroperabilityWhenFixtureIsProvided`を実行する。通常検証では1件skipであり、実AWS検証の成功を代替しない。テスト用鍵・素材だけで実署名Range GETを復号し、作成した正確な版だけを除去する。本人の鍵作成・復旧パスワード入力・実素材の送信は本人が操作する。
@@ -91,3 +93,10 @@ Web/API標準検証後、`npm.cmd run short-smoke --prefix desktop`で隔離Chro
 iOSではMacでSwift全テスト・iOS Build・IntegrationTests（動画失敗保全と開発用動画保存/復元の追加テスト）を実行し、実機で画像/動画取り込み、縦スワイプ、前へ、アルバム、詳細、タブ/背景で停止、音声、原本保存、復元後の派生だけの取得を確認する。AVFoundation実変換・Dynamic Type・VoiceOver・キャッシュ削除中の再生は未検証。[仕様](docs/MY-SHORT.md)。
 
 S3ごみ箱は `local-api/tests/test_cloud_trash.py` と `backend/tests/test_reader.py`。個別／複数／フォルダ／空フォルダ、復元、原本保持、全版と削除マーカー、正確なキー限定、共有参照拒否、条件付き保存競合、途中失敗・再起動後の手動再試行、鍵解除前の非表示・操作拒否、旧履歴操作による最新版巻き戻り防止を確認する。実AWSの削除試験は専用の合成ファイルだけを使う。本人の素材は試験で削除しない。[操作](docs/S3-TRASH.md)。
+
+通常画像の即時キャッシュ表示はIntegrationTestsの `testReaderCacheDisplaysWithoutNetworkAndRelockRejectsOldCatalog` で、無効な接続先でも取得済みカタログとディスク画像を再利用できること、未解除フォルダ・再ロック・ログアウトで拒否することを隔離キャッシュで検証する。背景更新の実通信と実画面の体感速度は別途確認する。
+
+費用画面は `local-api/tests/test_usage.py`、`backend/tests/test_usage.py`、`Tests/PhotoHubCoreTests/UsageTests.swift`。ページング・旧版・履歴・欠損とエラー・共有保存照合・本人限定読取・端末別通信記録を検証する。Mac／iOSビルド、実AWSのコード一致・未認証401・本人GET・集計共有は別途確認。[仕様](docs/USAGE-DASHBOARD.md)。
+
+
+読み込み速度はiOS IntegrationTestsで30素材の署名URL同時要求が1通信にまとまること、署名結果再利用、同一画像12要求が1ダウンロードになること、メモリ／ディスク再利用で追加通信しないこと、再ロック拒否、キャンセル30件後の待ち行列消滅を検証する。backend ReaderTestsは最大60件を1カタログ読取で署名し、所属外・未解除・重複・上限超過を一括拒否する。実機の体感速度と請求額はこの隔離テストの対象外。

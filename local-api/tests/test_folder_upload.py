@@ -161,7 +161,9 @@ class FolderUploadTests(unittest.TestCase):
         self.cloud.after_put = lambda: self.service.pause(plan['id'])
         self.service.upload(plan['id'])
         self.assertEqual(self.service.read(plan['id'])['state'], 'paused')
-        self.assertEqual(len(self.cloud.puts), 1)
+        self.assertGreaterEqual(len(self.cloud.puts), 1)
+        self.assertLessEqual(len(self.cloud.puts), 2)
+        self.assertFalse(any('/catalogs/' in key for key in self.cloud.puts))
         self.cloud.after_put = None
         raw = self.service.read(plan['id'])
         raw['stop'] = False

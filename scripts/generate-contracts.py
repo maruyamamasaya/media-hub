@@ -25,15 +25,19 @@ def generated():
         ts.append(f'export interface {name} {{')
         sw.append(f'public struct {name}: Codable, Sendable {{')
         for key, prop in model['properties'].items():
-            ts.append(f'  {key}: {type_name(prop)};')
-            sw.append(f'    public let {key}: {type_name(prop, True)}')
+            optional = key not in model.get('required', [])
+            ts.append(f'  {key}{"?" if optional else ""}: {type_name(prop)};')
+            swift_type = type_name(prop, True)
+            sw.append(f'    public let {key}: {swift_type}{"?" if optional and not swift_type.endswith("?") else ""}')
         sw.append('    private enum CodingKeys: String, CodingKey {')
         sw.append('        case ' + ', '.join(model['properties']))
         sw.append('    }')
         sw.append('    public func encode(to encoder: Encoder) throws {')
         sw.append('        var container = encoder.container(keyedBy: CodingKeys.self)')
         for key, prop in model['properties'].items():
-            if isinstance(prop.get('type'), list):
+            if key not in model.get('required', []):
+                sw.append(f'        try container.encodeIfPresent({key}, forKey: .{key})')
+            elif isinstance(prop.get('type'), list):
                 sw.append(f'        if let value = {key} {{ try container.encode(value, forKey: .{key}) }} else {{ try container.encodeNil(forKey: .{key}) }}')
             else:
                 sw.append(f'        try container.encode({key}, forKey: .{key})')

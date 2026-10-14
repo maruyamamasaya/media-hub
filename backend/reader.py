@@ -8,6 +8,7 @@ from app import client, response, valid_id
 import folder_security as privacy
 import encrypted_reader
 import catalog_trash
+import usage_report
 
 MAX_CATALOG_BYTES = 4 * 1024 * 1024
 
@@ -86,6 +87,9 @@ def handler(event, context):
         return response(405, {'error': 'Read only'})
     try:
         s3 = client()
+        if path == '/usage':
+            value = usage_report.load(s3, bucket)
+            return response(200, value) if value is not None else response(404, {'error': 'Refresh usage on Mac first'})
         if path.startswith('/encrypted-'):
             status, value = encrypted_reader.handle(s3, bucket, path)
             return response(status, value)
@@ -154,6 +158,20 @@ def handler(event, context):
         if value is None:
             return reply(404, {'error': 'Not found'})
         if len(parts) == 3:
+            ids = (event.get('queryStringParameters') or {}).get('thumbnailIds')
+            if ids is not None:
+                requested = ids.split(',')
+                if not 1 <= len(requested) <= 60 or len(set(requested)) != len(requested) or not all(valid_id(i) for i in requested):
+                    raise ValueError('Invalid thumbnail batch')
+                items = {i['id']: i for i in value['items']}
+                # Validate the whole batch before signing anything, after visibility filtering.
+                if any(i not in items or not items[i].get('thumbnailKey') for i in requested):
+                    return reply(404, {'error': 'Preview unavailable'})
+                urls = {}
+                for identity in requested:
+                    params = {'Bucket': bucket, 'Key': items[identity]['thumbnailKey'], 'ResponseCacheControl': 'private, no-store'}
+                    urls[identity] = s3.generate_presigned_url('get_object', Params=params, ExpiresIn=300, HttpMethod='GET')
+                return reply(200, {'urls': urls, 'expiresIn': 300})
             return reply(200, public_catalog(value))
         if parts[3] != 'items' or parts[5] != 'url' or not valid_id(parts[4]):
             return reply(404, {'error': 'Not found'})

@@ -409,8 +409,9 @@ public struct FolderUpload: Codable, Sendable {
     public let skipped: Int64
     public let folders: [MediaFolder]
     public let items: [FolderUploadItem]
+    public let progress: UploadProgress?
     private enum CodingKeys: String, CodingKey {
-        case id, name, bucket, profile, region, state, error, byteSize, completed, skipped, folders, items
+        case id, name, bucket, profile, region, state, error, byteSize, completed, skipped, folders, items, progress
     }
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -426,6 +427,7 @@ public struct FolderUpload: Codable, Sendable {
         try container.encode(skipped, forKey: .skipped)
         try container.encode(folders, forKey: .folders)
         try container.encode(items, forKey: .items)
+        try container.encodeIfPresent(progress, forKey: .progress)
     }
 }
 
@@ -643,6 +645,106 @@ public struct CloudTrashEntry: Codable, Sendable {
         try container.encode(byteSize, forKey: .byteSize)
         try container.encode(itemIds, forKey: .itemIds)
         try container.encode(folderIds, forKey: .folderIds)
+    }
+}
+
+public struct UploadProgress: Codable, Sendable {
+    public let phase: String
+    public let name: String
+    public let bytes: Int64
+    public let totalBytes: Int64
+    public let remainingSeconds: Int64?
+    public let activeFiles: Int64
+    private enum CodingKeys: String, CodingKey {
+        case phase, name, bytes, totalBytes, remainingSeconds, activeFiles
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(phase, forKey: .phase)
+        try container.encode(name, forKey: .name)
+        try container.encode(bytes, forKey: .bytes)
+        try container.encode(totalBytes, forKey: .totalBytes)
+        if let value = remainingSeconds { try container.encode(value, forKey: .remainingSeconds) } else { try container.encodeNil(forKey: .remainingSeconds) }
+        try container.encode(activeFiles, forKey: .activeFiles)
+    }
+}
+
+public struct UsagePoint: Codable, Sendable {
+    public let date: String
+    public let storageBytes: Int64
+    public let storageEstimateYen: Double?
+    private enum CodingKeys: String, CodingKey {
+        case date, storageBytes, storageEstimateYen
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(date, forKey: .date)
+        try container.encode(storageBytes, forKey: .storageBytes)
+        if let value = storageEstimateYen { try container.encode(value, forKey: .storageEstimateYen) } else { try container.encodeNil(forKey: .storageEstimateYen) }
+    }
+}
+
+public struct UsageBudget: Codable, Sendable {
+    public let limitUSD: Double
+    public let actualUSD: Double
+    public let forecastUSD: Double?
+    public let notificationCount: Int64
+    public let recipientCount: Int64
+    private enum CodingKeys: String, CodingKey {
+        case limitUSD, actualUSD, forecastUSD, notificationCount, recipientCount
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(limitUSD, forKey: .limitUSD)
+        try container.encode(actualUSD, forKey: .actualUSD)
+        if let value = forecastUSD { try container.encode(value, forKey: .forecastUSD) } else { try container.encodeNil(forKey: .forecastUSD) }
+        try container.encode(notificationCount, forKey: .notificationCount)
+        try container.encode(recipientCount, forKey: .recipientCount)
+    }
+}
+
+public struct UsageReport: Codable, Sendable {
+    public let schemaVersion: Int64
+    public let updatedAt: String
+    public let region: String
+    public let storageBytes: Int64
+    public let currentBytes: Int64
+    public let previousBytes: Int64
+    public let normalBytes: Int64
+    public let encryptedBytes: Int64
+    public let thumbnailBytes: Int64
+    public let metadataBytes: Int64
+    public let storageEstimateYen: Double?
+    public let targetYen: Double
+    public let exchangeRate: Double
+    public let taxMultiplier: Double
+    public let rateUSDPerGiB: Double
+    public let history: [UsagePoint]
+    public let budget: UsageBudget?
+    public let notes: [String]
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, updatedAt, region, storageBytes, currentBytes, previousBytes, normalBytes, encryptedBytes, thumbnailBytes, metadataBytes, storageEstimateYen, targetYen, exchangeRate, taxMultiplier, rateUSDPerGiB, history, budget, notes
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encode(region, forKey: .region)
+        try container.encode(storageBytes, forKey: .storageBytes)
+        try container.encode(currentBytes, forKey: .currentBytes)
+        try container.encode(previousBytes, forKey: .previousBytes)
+        try container.encode(normalBytes, forKey: .normalBytes)
+        try container.encode(encryptedBytes, forKey: .encryptedBytes)
+        try container.encode(thumbnailBytes, forKey: .thumbnailBytes)
+        try container.encode(metadataBytes, forKey: .metadataBytes)
+        if let value = storageEstimateYen { try container.encode(value, forKey: .storageEstimateYen) } else { try container.encodeNil(forKey: .storageEstimateYen) }
+        try container.encode(targetYen, forKey: .targetYen)
+        try container.encode(exchangeRate, forKey: .exchangeRate)
+        try container.encode(taxMultiplier, forKey: .taxMultiplier)
+        try container.encode(rateUSDPerGiB, forKey: .rateUSDPerGiB)
+        try container.encode(history, forKey: .history)
+        try container.encodeIfPresent(budget, forKey: .budget)
+        try container.encode(notes, forKey: .notes)
     }
 }
 

@@ -175,6 +175,7 @@ export interface FolderUpload {
   skipped: number;
   folders: MediaFolder[];
   items: FolderUploadItem[];
+  progress?: UploadProgress;
 }
 
 export interface ReadRoot {
@@ -267,5 +268,49 @@ export interface CloudTrashEntry {
   byteSize: number;
   itemIds: string[];
   folderIds: string[];
+}
+
+export interface UploadProgress {
+  phase: string;
+  name: string;
+  bytes: number;
+  totalBytes: number;
+  remainingSeconds: number | null;
+  activeFiles: number;
+}
+
+export interface UsagePoint {
+  date: string;
+  storageBytes: number;
+  storageEstimateYen: number | null;
+}
+
+export interface UsageBudget {
+  limitUSD: number;
+  actualUSD: number;
+  forecastUSD: number | null;
+  notificationCount: number;
+  recipientCount: number;
+}
+
+export interface UsageReport {
+  schemaVersion: number;
+  updatedAt: string;
+  region: string;
+  storageBytes: number;
+  currentBytes: number;
+  previousBytes: number;
+  normalBytes: number;
+  encryptedBytes: number;
+  thumbnailBytes: number;
+  metadataBytes: number;
+  storageEstimateYen: number | null;
+  targetYen: number;
+  exchangeRate: number;
+  taxMultiplier: number;
+  rateUSDPerGiB: number;
+  history: UsagePoint[];
+  budget?: UsageBudget;
+  notes: string[];
 }
 

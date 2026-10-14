@@ -42,6 +42,37 @@ class ReaderTests(unittest.TestCase):
     def call(self, path='/library', method='GET', owner=OWNER, query=None, headers=None, body=None):
         return reader.handler({'rawPath': path, 'headers': headers or {}, 'body': json.dumps(body) if body else '', 'queryStringParameters': query, 'requestContext': {'http': {'method': method}, 'authorizer': {'jwt': {'claims': {'sub': owner} if owner else {}}}}}, None)
 
+    def test_thumbnail_batch_uses_one_catalog_read_and_rejects_hidden_members(self):
+        self.fake.value['items'][0]['thumbnailKey'] = f'media-hub/thumbnails/{ITEM}/{SHA}.png'
+        with patch.object(self.fake, 'get_object', wraps=self.fake.get_object) as get:
+            result = self.call(f'/catalogs/{ROOT}/{UPLOAD}', query={'thumbnailIds': ITEM})
+            self.assertEqual(result['statusCode'], 200)
+            self.assertEqual(set(json.loads(result['body'])['urls']), {ITEM})
+            self.assertEqual(get.call_count, 2)  # Lock settings + one catalog.
+        self.fake.signed.clear()
+        for ids, status in [(ITEM + ',' + FOLDER, 404), (','.join([ITEM] * 61), 400), (ITEM + ',' + ITEM, 400)]:
+            self.assertEqual(self.call(f'/catalogs/{ROOT}/{UPLOAD}', query={'thumbnailIds': ids})['statusCode'], status)
+            self.assertEqual(self.fake.signed, [])
+        self.fake.settings['locks'] = [folder_security.make_lock(ROOT, FOLDER, '012345')]
+        self.assertEqual(self.call(f'/catalogs/{ROOT}/{UPLOAD}', query={'thumbnailIds': ITEM})['statusCode'], 404)
+        self.assertEqual(self.fake.signed, [])
+
+    def test_sixty_thumbnails_need_only_one_catalog_fetch(self):
+        import uuid
+        items = []
+        for _ in range(60):
+            identity = str(uuid.uuid4())
+            item = dict(self.fake.value['items'][0], id=identity, objectKey=f'media-hub/originals/{identity}/{SHA}', thumbnailKey=f'media-hub/thumbnails/{identity}/{SHA}.png')
+            items.append(item)
+        self.fake.value['items'] = items
+        with patch.object(self.fake, 'get_object', wraps=self.fake.get_object) as get:
+            result = self.call(f'/catalogs/{ROOT}/{UPLOAD}', query={'thumbnailIds': ','.join(i['id'] for i in items)})
+        self.assertEqual(result['statusCode'], 200)
+        self.assertEqual(len(json.loads(result['body'])['urls']), 60)
+        self.assertEqual(get.call_count, 2)
+        self.assertEqual(len(self.fake.signed), 60)
+        self.assertTrue(all(args['ExpiresIn'] == 300 for _, args in self.fake.signed))
+
     def test_locked_root_hidden_catalog_and_url_until_owner_password(self):
         self.fake.settings['locks'] = [folder_security.make_lock(ROOT, FOLDER, '012345')]
         self.assertEqual(json.loads(self.call()['body']), [])

@@ -7,11 +7,11 @@ public actor SealedHTTP {
     private let provider: @Sendable () async throws -> URL
     private var current: URL?
     private var expires = Date.distantPast
-    public init(provider: @escaping @Sendable () async throws -> URL) {
+    public init(usageScope: String? = nil, provider: @escaping @Sendable () async throws -> URL) {
         self.provider = provider
         let configuration = URLSessionConfiguration.ephemeral
         configuration.urlCache = nil; configuration.timeoutIntervalForRequest = 120
-        network = URLSession(configuration: configuration)
+        network = URLSession(configuration: configuration, delegate: usageScope.map { UsageNetworkObserver(scope: $0) }, delegateQueue: nil)
     }
     public func bytes(_ range: Range<Int64>) async throws -> Data {
         guard range.lowerBound >= 0, range.count > 0, range.count <= SealedMedia.chunkSize + 16 else { throw SealedError.invalid }

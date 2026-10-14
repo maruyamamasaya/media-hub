@@ -74,10 +74,40 @@ final class RuntimeTests: XCTestCase {
         let cookie = try XCTUnwrap(HTTPCookie(properties: [.domain: "127.0.0.1", .path: "/api/v1", .name: "folder_grant", .value: "test-only", .expires: Date().addingTimeInterval(300)]))
         storage.setCookie(cookie)
         XCTAssertTrue(storage.cookies?.contains { $0.name == "folder_grant" } == true)
+        // A ready runtime with no origin makes any inline refresh fail.
+        // Relocking must clear secrets immediately and leave network work to polling.
+        runtime.ready = true
         await model.relock()
+        XCTAssertTrue(model.error.isEmpty)
+        XCTAssertFalse(model.busy)
+        XCTAssertFalse(model.refreshing)
         XCTAssertNotEqual(model.privacyID, original)
         XCTAssertTrue(storage.cookies?.isEmpty ?? true)
         XCTAssertTrue(model.library.isEmpty)
+    }
+    @MainActor
+    func testActivationPreservesPINSheetIdentityAndKeychainFocusChanges() async throws {
+        let root = FileManager.default.temporaryDirectory
+        let model = MacModel(runtime: MacRuntime(root: root, dataRoot: root))
+        let identity = model.privacyID
+        await model.applicationActivated()
+        XCTAssertEqual(model.privacyID, identity)
+        model.beginKeychainInteraction()
+        await model.applicationDeactivated()
+        await model.applicationActivated()
+        XCTAssertFalse(model.concealed)
+        XCTAssertEqual(model.privacyID, identity)
+        await model.endKeychainInteraction()
+        // Once the interaction ends, a real application switch still locks immediately.
+        model.hiddenPagesOpen = true
+        let unlockedIdentity = model.privacyID
+        await model.applicationDeactivated()
+        XCTAssertTrue(model.concealed)
+        XCTAssertFalse(model.hiddenPagesOpen)
+        XCTAssertNotEqual(model.privacyID, unlockedIdentity)
+        await model.applicationActivated()
+        XCTAssertFalse(model.concealed)
+        XCTAssertFalse(model.hiddenPagesOpen)
     }
     @MainActor
     func testHTTPFailuresNeverDecodeAsSuccess() async throws {

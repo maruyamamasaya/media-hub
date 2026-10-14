@@ -55,7 +55,7 @@ struct PhoneSealedKeySheet: View {
 @MainActor
 func phoneSealedReader(_ model: CloudViewerModel, root: SealedRoot, secret: MediaSecret, objectID: String?, length: Int64?, maximum: Int64) -> SealedRangeReader {
     let identity = model.sessionID
-    let http = SealedHTTP { [weak model] in
+    let http = SealedHTTP(usageScope: model.usageScope) { [weak model] in
         guard let model, await model.sessionID == identity else { throw CancellationError() }
         return try await model.encryptedURL(root, objectID: objectID)
     }
@@ -67,16 +67,20 @@ struct PhoneSealedLibrary: View {
     @State private var roots: [SealedRoot] = []
     @State private var error = ""
     var body: some View {
-        List {
-            if !model.signedIn { Text("「見る」から本人ログインしてください。") }
-            else {
-                PhoneSealedKeyImport()
-                if let secret {
-                    ForEach(roots.filter { $0.keyID == secret.keyID }) { root in PhoneSealedRootRow(root: root, secret: secret) }
-                    if roots.isEmpty { Text("暗号化して保存したフォルダはまだありません。") }
-                } else { Text("最初にMacの復旧ファイルを読み込んでください。") }
-            }
-            if !error.isEmpty { Text(error).foregroundStyle(.red) }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                if !model.signedIn { Text("「見る」から本人ログインしてください。") }
+                else {
+                    if let secret {
+                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 20) {
+                            ForEach(roots.filter { $0.keyID == secret.keyID }) { root in PhoneSealedRootRow(root: root, secret: secret) }
+                        }
+                        if roots.filter({ $0.keyID == secret.keyID }).isEmpty { ContentUnavailableView("フォルダはまだありません", systemImage: "folder") }
+                        DisclosureGroup("暗号化の鍵") { PhoneSealedKeyImport() }
+                    } else { PhoneSealedKeyImport() }
+                }
+                if !error.isEmpty { Text(error).foregroundStyle(.red) }
+            }.padding(16)
         }.navigationTitle("暗号化フォルダ").task { await load() }
             .refreshable { await load() }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in Task { await load() } }
@@ -99,7 +103,9 @@ struct PhoneSealedRootRow: View {
     var body: some View {
         Group {
             if let catalog {
-                NavigationLink { PhoneSealedFolder(root: root, catalog: catalog, secret: secret, folderID: catalog.folders.first { $0.parentId == nil }?.id) } label: { Label(catalog.name, systemImage: "lock.shield") }
+                NavigationLink { PhoneSealedFolder(root: root, catalog: catalog, secret: secret, folderID: catalog.folders.first { $0.parentId == nil }?.id) } label: {
+                    PhoneSealedFolderTile(root: root, catalog: catalog, secret: secret, name: catalog.name, folderID: catalog.folders.first { $0.parentId == nil }?.id)
+                }.buttonStyle(.plain)
             } else if !error.isEmpty { Text(error).foregroundStyle(.red) }
             else { ProgressView("暗号化フォルダを復号中…") }
         }.task {
@@ -114,19 +120,86 @@ struct PhoneSealedRootRow: View {
         }
     }
 }
+struct PhoneSealedFolderTile: View {
+    let root: SealedRoot; let catalog: SealedCatalog; let secret: MediaSecret
+    let name: String; let folderID: String?
+    private var cover: SealedItem? {
+        var ids = Set<String>(); if let folderID { ids.insert(folderID) }
+        for _ in 0..<catalog.folders.count {
+            let children = catalog.folders.filter { $0.parentId.map { ids.contains($0) } == true }.map(\.id)
+            let before = ids.count; ids.formUnion(children); if ids.count == before { break }
+        }
+        let candidates = catalog.items.filter { ids.contains($0.folderId) && $0.thumbnailID != nil }
+        return candidates.first { $0.mimeType.hasPrefix("image/") } ?? candidates.first
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Group {
+                if let cover { PhoneSealedThumbnail(root: root, item: cover, secret: secret) }
+                else { ZStack { Color.secondary.opacity(0.10); Image(systemName: "folder.fill").font(.largeTitle).foregroundStyle(.secondary) }.aspectRatio(1, contentMode: .fit) }
+            }.clipShape(RoundedRectangle(cornerRadius: 16))
+            Text(name).font(.subheadline.weight(.medium)).lineLimit(2).foregroundStyle(.primary)
+        }.accessibilityElement(children: .combine)
+    }
+}
 struct PhoneSealedFolder: View {
     let root: SealedRoot; let catalog: SealedCatalog; let secret: MediaSecret; let folderID: String?
+    @State private var selected: SealedItem?
+    private var items: [SealedItem] { catalog.items.filter { $0.folderId == folderID } }
     var body: some View {
-        List {
-            ForEach(catalog.folders.filter { $0.parentId == folderID }) { folder in
-                NavigationLink { PhoneSealedFolder(root: root, catalog: catalog, secret: secret, folderID: folder.id) } label: { Label(folder.name, systemImage: "folder") }
-            }
-            ForEach(catalog.items.filter { $0.folderId == folderID }) { item in
-                NavigationLink { PhoneSealedMedia(root: root, item: item, secret: secret) } label: {
-                    HStack { PhoneSealedThumbnail(root: root, item: item, secret: secret); Text(item.name) }
+        ScrollView {
+            VStack(spacing: 16) {
+                let children = catalog.folders.filter { $0.parentId == folderID }
+                if !children.isEmpty {
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
+                        ForEach(children) { folder in
+                            NavigationLink { PhoneSealedFolder(root: root, catalog: catalog, secret: secret, folderID: folder.id) } label: {
+                                PhoneSealedFolderTile(root: root, catalog: catalog, secret: secret, name: folder.name, folderID: folder.id)
+                            }.buttonStyle(.plain)
+                        }
+                    }.padding(.horizontal, 12)
+                }
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 3), spacing: 2) {
+                    ForEach(items) { item in
+                        Button { selected = item } label: { PhoneSealedThumbnail(root: root, item: item, secret: secret) }
+                            .buttonStyle(.plain).accessibilityLabel(item.mimeType.hasPrefix("video/") ? "動画" : "写真")
+                    }
+                }
+                if children.isEmpty && items.isEmpty { ContentUnavailableView("空のフォルダ", systemImage: "folder") }
+            }.padding(.vertical, 8)
+        }.navigationTitle("").navigationBarTitleDisplayMode(.inline)
+        .fullScreenCover(item: $selected) { item in PhoneSealedMediaScreen(root: root, items: items, secret: secret, initialID: item.id) }
+    }
+}
+struct PhoneSealedMediaScreen: View {
+    @Environment(\.dismiss) private var dismiss
+    let root: SealedRoot; let items: [SealedItem]; let secret: MediaSecret; let initialID: String
+    @State private var index = 0
+    @State private var controls = true
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            PhoneSealedMedia(root: root, item: items[index], secret: secret, controls: $controls, onSwipe: move)
+                .id(items[index].id)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .simultaneousGesture(DragGesture(minimumDistance: 40).onEnded { value in
+                    guard items[index].mimeType.hasPrefix("video/"), abs(value.translation.width) > abs(value.translation.height) else { return }
+                    move(value.translation.width < 0 ? 1 : -1)
+                })
+            if controls || items[index].mimeType.hasPrefix("video/") {
+                VStack {
+                    HStack {
+                        Button { dismiss() } label: { Image(systemName: "xmark").padding(12).background(.black.opacity(0.5), in: Circle()) }.accessibilityLabel("閉じる")
+                        Spacer()
+                    }.foregroundStyle(.white).padding()
+                    Spacer()
                 }
             }
-        }.navigationTitle(catalog.folders.first { $0.id == folderID }?.name ?? catalog.name)
+        }.onAppear { index = items.firstIndex { $0.id == initialID } ?? 0 }
+    }
+    private func move(_ direction: Int) {
+        let next = index + direction
+        if items.indices.contains(next) { index = next; controls = true }
     }
 }
 struct PhoneSealedThumbnail: View {
@@ -134,10 +207,14 @@ struct PhoneSealedThumbnail: View {
     let root: SealedRoot; let item: SealedItem; let secret: MediaSecret
     @State private var image: UIImage?
     var body: some View {
-        Group {
-            if let image { Image(uiImage: image).resizable().scaledToFit() }
-            else { Image(systemName: item.mimeType.hasPrefix("video/") ? "play.rectangle" : "photo").foregroundStyle(.secondary) }
-        }.frame(width: 52, height: 52).task {
+        GeometryReader { geometry in
+            ZStack(alignment: .bottomTrailing) {
+                Color.secondary.opacity(0.10)
+                if let image { Image(uiImage: image).resizable().scaledToFill().frame(width: geometry.size.width, height: geometry.size.height).clipped() }
+                else { Image(systemName: item.mimeType.hasPrefix("video/") ? "play.rectangle" : "photo").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
+                if item.mimeType.hasPrefix("video/") { Image(systemName: "play.fill").font(.caption).foregroundStyle(.white).padding(7).background(.black.opacity(0.45), in: Circle()).padding(6) }
+            }
+        }.aspectRatio(1, contentMode: .fit).task {
             guard let id = item.thumbnailID, let count = item.thumbnailBytes else { return }
             let identity = model.sessionID
             let reader = phoneSealedReader(model, root: root, secret: secret, objectID: id, length: count, maximum: 50000)
@@ -151,23 +228,25 @@ struct PhoneSealedMedia: View {
     let root: SealedRoot; let item: SealedItem; let secret: MediaSecret
     @State private var image: UIImage?
     @State private var player: AVPlayer?
+    @Binding var controls: Bool
+    let onSwipe: (Int) -> Void
     @State private var loader: SealedPlayerLoader?
     @State private var reader: SealedRangeReader?
     @State private var error = ""
     var body: some View {
         Group {
-            if let image { Image(uiImage: image).resizable().scaledToFit() }
+            if let image { PhoneZoomableImage(image: image, onTap: { controls.toggle() }, onSwipe: onSwipe) }
             else if let player { VideoPlayer(player: player) }
             else if !error.isEmpty { Text(error).foregroundStyle(.red) }
-            else { ProgressView("復号して読み込み中…") }
-        }.navigationTitle(item.name).navigationBarTitleDisplayMode(.inline).task {
+            else { ProgressView().tint(.white) }
+        }.task {
             let identity = model.sessionID
             let reader = phoneSealedReader(model, root: root, secret: secret, objectID: item.objectID, length: item.byteSize, maximum: item.mimeType.hasPrefix("video/") ? 5 * 1024 * 1024 * 1024 : 100 * 1024 * 1024)
             self.reader = reader
             do {
                 if item.mimeType.hasPrefix("video/") {
                     let loader = SealedPlayerLoader(reader: reader, mime: item.mimeType)
-                    if identity == model.sessionID, !Task.isCancelled { self.loader = loader; player = AVPlayer(playerItem: AVPlayerItem(asset: loader.asset)) }
+                    if identity == model.sessionID, !Task.isCancelled { self.loader = loader; player = AVPlayer(playerItem: AVPlayerItem(asset: loader.asset)); model.recordVideoStart() }
                 } else {
                     let bytes = try await reader.allData()
                     guard SHA256.hash(data: bytes).map({ String(format: "%02x", $0) }).joined() == item.sha256, let value = UIImage(data: bytes) else { throw SealedError.invalid }
@@ -178,13 +257,20 @@ struct PhoneSealedMedia: View {
     }
 }
 
-// Pace URL issuance to the existing 2 requests/second owner API without changing server limits.
+// Stay below the owner reader API's 20 requests/second limit.
+// Reserve only when a request can start: cancelled tiles must not leave a backlog.
 actor SealedRequestGate {
     private var next = ContinuousClock.now
     func wait() async throws {
-        let clock = ContinuousClock(), now = ContinuousClock.now
-        let start = max(now, next)
-        next = start.advanced(by: .milliseconds(600))
-        try await clock.sleep(until: start)
+        let clock = ContinuousClock()
+        while true {
+            try Task.checkCancellation()
+            let now = clock.now
+            if now >= next {
+                next = now.advanced(by: .milliseconds(60))
+                return
+            }
+            try await clock.sleep(until: next)
+        }
     }
 }
