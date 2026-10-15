@@ -217,9 +217,7 @@ def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_ori
 
     @app.get('/api/v1/folder-library')
     def folder_library(request: Request):
-        with folder_uploads.lock:
-            for summary in folder_uploads.list():
-                trash.sync(folder_uploads.read(summary['id']))
+        trash.sync_library()
         return privacy.library(folder_grant(request)) if privacy_enabled else folder_uploads.library()
 
     @app.get('/api/v1/folder-library/trash')

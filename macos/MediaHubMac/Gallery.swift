@@ -113,7 +113,7 @@ struct MediaThumbnail: View {
         Group {
             if let image { Image(nsImage: image).resizable().scaledToFill() }
             else {
-                Image(systemName: isVideo(item.name) ? "play.rectangle" : "photo")
+                Image(systemName: URL(fileURLWithPath: item.name).pathExtension.lowercased() == "pdf" ? "doc.richtext" : (isVideo(item.name) ? "play.rectangle" : "photo"))
                     .font(.system(size: 32, weight: .ultraLight)).foregroundStyle(.secondary.opacity(0.6))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }

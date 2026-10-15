@@ -2,6 +2,7 @@
 
 | Feature | Primary paths | Search keywords / Key entry points | Related tests |
 | --- | --- | --- | --- |
+| PDF送信・閲覧 | `Sources/PhotoHubCore/PDFReader.swift`, `local-api/vault/pdf_preview.py`, `macos/MediaHubCrypto/main.swift` | `MediaPDFReader`, `pdfData`, `render_pdf`, `--pdf-thumbnail` | `test_pdf_upload.py`, `PDFTests.swift`, iOS `testPDFDownloadIntegrityRelockAndMemoryDecryption` |
 | マイショート・動画 | `web/src/MyShort.tsx`, `local-api/vault/service.py`, `ios/PhotoHub/Views.swift`, `PhotoImporter.swift`, `LibraryModel.swift` | `MyShort`, `session_rank`, `video_preview`, `MyShortView`, `ShortVideo`, `videoDerivatives`, `loadPlayback` | `local-api/tests/test_my_short.py`, `desktop/short-smoke.cjs`, `IntegrationTests`（iOS未実行） |
 | Web画面 | `web/src/App.tsx`, `AssetDetail.tsx`, `Modal.tsx`, `api.ts` | `App`, `upload`, `retryImports`, `AssetDetail`, `fileUrl` | Web build、ブラウザ一連操作 |
 | 容量と費用・通信集計 | `local-api/vault/usage.py`, `backend/usage_report.py`, `Sources/PhotoHubCore/UsageDashboard.swift`, `UsageActivity.swift`, `macos/MediaHubMac/UsageScreen.swift`, `ios/PhotoHub/CloudViewer.swift` | `Usage`, `UsageNetworkObserver`, `PhoneUsageScreen`, `/usage` | `local-api/tests/test_usage.py`, `backend/tests/test_usage.py`, `Tests/PhotoHubCoreTests/UsageTests.swift` |
@@ -24,6 +25,7 @@
 | 整理・削除・原本保存 | `LibraryModel.swift`, `Views.swift` | `toggleMembership`, `setFavorite`, `requestDelete`, `finishDelete`, `saveOriginal` | `IntegrationTests`, `CoreTests` |
 | JSONバックアップ・復元 | `Models.swift`, `Repository.swift`, `LibraryModel.swift` | `Backup.validate`, `snapshot`, `restore`, `schemaVersion`, `latest.json` | `CoreTests`, `IntegrationTests` |
 | フォルダ別パスワード・非表示 | `backend/folder_security.py`, `local-api/vault/folder_privacy.py`, `web/src/CloudFolders.tsx`, `ios/PhotoHub/CloudViewer.swift` | `visible`, `grants`, `folder-unlock`, `relock`, `revision` | `backend/tests/test_folder_security.py`, `test_reader.py`, `local-api/tests/test_folder_privacy.py` |
+| iPhone横断一覧・ランダム閲覧 | `ios/PhotoHub/CloudViewer.swift` | `ReaderOverview`, `ReaderEntry`, `ReaderSwipeScreen`, `ReaderOverviewMode` | `testOverviewSeparatesMediaAndKeepsIdentityAcrossFolders` |
 | iPhone閲覧・本人GET API | `ios/PhotoHub/CloudViewer.swift`, `backend/reader.py`, `infrastructure/reader.yaml` | `CloudViewerRoot`, `CloudViewerModel`, `/library`, `/catalogs` | `backend/tests/test_reader.py`、iOSビルド |
 | S3ごみ箱・完全削除 | `local-api/vault/cloud_trash.py`, `backend/catalog_trash.py`, `macos/MediaHubMac/Views.swift` | `CloudTrash`, `CloudTrashScreen`, `purge_versions`, `/folder-library/trash` | `local-api/tests/test_cloud_trash.py`, `backend/tests/test_reader.py` |
 | S3フォルダ閲覧 | `web/src/CloudFolders.tsx`, `local-api/vault/folder_upload.py` | `library`, `media`, `/folder-library` | `CloudLibraryTests` |

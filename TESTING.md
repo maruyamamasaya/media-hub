@@ -26,6 +26,8 @@ Mac画面・操作・配布の未確認項目は [Mac SwiftUI](docs/MAC-SWIFTUI.
 
 実AWSの合成素材検証は明示実行時だけ`MEDIA_HUB_SEALED_FIXTURE`を指定して`testAWSInteroperabilityWhenFixtureIsProvided`を実行する。通常検証では1件skipであり、実AWS検証の成功を代替しない。テスト用鍵・素材だけで実署名Range GETを復号し、作成した正確な版だけを除去する。本人の鍵作成・復旧パスワード入力・実素材の送信は本人が操作する。
 
+PDFの通常／暗号化送信・2ページ目の描画・PDF自体のパスワード・再ロック拒否は[PDF検証](docs/PDF-SUPPORT.md)を参照。
+
 ## Fast Validation
 アーカイブ変更では、個別切り替え→通常一覧から除外→アーカイブ表示→原本取得→通常へ戻す、選択一括操作、コレクション全体操作、保管状態を指定した検索をブラウザで確認する。DB移行、再起動保持、所属と原本ハッシュ保持、ごみ箱復元、revision/token競合と全件ロールバック、ページ上限を超えるコレクション操作は隔離APIテストで検証する。
 

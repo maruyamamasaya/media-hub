@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from vault.folder_privacy import FolderPrivacy, security
@@ -37,6 +38,26 @@ class PrivateCloud(FakeCloud):
         return super().put(path,key,digest,content_type)
 
 class FolderPrivacyTests(unittest.TestCase):
+    def test_listing_shares_settings_but_authorization_refreshes(self):
+        with patch.object(self.privacy, '_load', wraps=self.privacy._load) as load:
+            with patch('vault.folder_privacy.time.monotonic', return_value=100):
+                self.privacy.plans('')
+                self.privacy.library('')
+                self.assertEqual(load.call_count, 1)
+            with patch('vault.folder_privacy.time.monotonic', return_value=111):
+                self.privacy.library('')
+                self.assertEqual(load.call_count, 2)
+                self.privacy.authorize(self.plan['id'], self.plan['items'][0]['id'], '')
+                self.assertEqual(load.call_count, 3)
+
+    def test_settings_cache_is_not_used_after_failed_forced_read(self):
+        self.privacy.load(cached=True)
+        with patch.object(self.privacy, '_load', side_effect=VaultError('cloud_error', 'offline', 502)):
+            with self.assertRaises(VaultError):
+                self.privacy.load()
+            with self.assertRaises(VaultError):
+                self.privacy.load(cached=True)
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name)
@@ -63,6 +84,37 @@ class FolderPrivacyTests(unittest.TestCase):
         self.privacy.set({'planId':self.plan['id'],'folderId':self.folder,'password':None,'confirmSave':True},token)
         self.assertEqual(len(self.privacy.library('')),1)
         self.assertEqual(originals,{key:value for key,value in self.cloud.objects.items() if '/originals/' in key})
+    def test_reuse_existing_pin_hides_and_unlocks_with_same_pin(self):
+        existing = security.make_lock(str(uuid.uuid4()), str(uuid.uuid4()), '012345')
+        self.cloud.settings['locks'] = [existing]
+        self.cloud.install_settings()
+        self.privacy.set({'planId': self.plan['id'], 'folderId': self.folder,
+                          'reuseExistingPIN': True, 'confirmSave': True}, '')
+        self.assertEqual(self.privacy.library(''), [])
+        with self.assertRaises(VaultError):
+            self.privacy.authorize(self.plan['id'], self.plan['items'][0]['id'], '')
+        saved = security.validate(json.loads(self.cloud.objects[security.KEY]))
+        self.assertEqual(saved['locks'][0], existing)
+        self.assertNotIn(b'012345', self.cloud.objects[security.KEY])
+        token = security.unlock(saved, '012345', 'desktop')['token']
+        self.assertEqual(len(self.privacy.library(token)), 1)
+        with self.assertRaises(ValueError):
+            security.unlock(saved, '999999', 'desktop')
+        with self.assertRaises(VaultError):
+            self.privacy.set({'planId': self.plan['id'], 'folderId': self.folder,
+                              'reuseExistingPIN': True, 'confirmSave': True}, '')
+
+    def test_reuse_missing_or_ambiguous_pin_does_not_save(self):
+        for locks in [[], [security.make_lock(str(uuid.uuid4()), str(uuid.uuid4()), pin)
+                           for pin in ['012345', '654321']]]:
+            self.cloud.settings['locks'] = locks
+            self.cloud.install_settings()
+            before = self.cloud.objects[security.KEY]
+            with self.assertRaises(VaultError):
+                self.privacy.set({'planId': self.plan['id'], 'folderId': self.folder,
+                                  'reuseExistingPIN': True, 'confirmSave': True}, '')
+            self.assertEqual(self.cloud.objects[security.KEY], before)
+
     def test_config_failure_no_bypass_and_unconfirmed_save_denied(self):
         with self.assertRaises(VaultError): self.privacy.set({'confirmSave':False},'')
         self.cloud.objects[security.KEY]=b'broken'

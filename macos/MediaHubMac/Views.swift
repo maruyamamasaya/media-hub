@@ -131,7 +131,7 @@ struct UploadScreen: View {
             VStack(alignment: .leading, spacing: 28) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(encrypted ? "暗号化して追加" : "写真と動画を追加").font(.system(size: 26, weight: .semibold))
+                        Text(encrypted ? "暗号化して追加" : "写真・動画・PDFを追加").font(.system(size: 26, weight: .semibold))
                         Text("フォルダを選ぶか、ここへドラッグするとアップロードが始まります。")
                             .foregroundStyle(.secondary)
                     }
@@ -185,7 +185,7 @@ struct UploadScreen: View {
                         Image(systemName: "photo.on.rectangle.angled")
                             .font(.system(size: 44, weight: .light)).foregroundStyle(Color.accentColor)
                         Text("追加するフォルダを選んでください").font(.headline)
-                        Text(encrypted ? "原本・小画像・ファイル名を暗号化して保存します。" : "写真・動画とフォルダ構成をそのまま保存します。")
+                        Text(encrypted ? "原本・小画像・ファイル名を暗号化して保存します。" : "写真・動画・PDFとフォルダ構成をそのまま保存します。")
                             .font(.callout).foregroundStyle(.secondary)
                         Button("フォルダを選ぶ", systemImage: "folder.badge.plus") { chooseFolder() }
                             .buttonStyle(.borderedProminent).controlSize(.large).disabled(choosingDisabled || (encrypted && !model.encryptionReady))
@@ -397,9 +397,10 @@ struct FolderPasswordSheet: View {
     var folderLocked = false
     @State private var password = ""
     @State private var confirmation = ""
+    @State private var specifyPIN = false
     @State private var processing = false
     @State private var operationError = ""
-    private func submit(_ entered: String?) {
+    private func submit(_ entered: String?, reuseExistingPIN: Bool = false) {
         guard !processing, !model.busy else { return }
         processing = true; operationError = ""; model.error = ""; model.notice = ""
         model.busy = true
@@ -407,8 +408,8 @@ struct FolderPasswordSheet: View {
             defer { processing = false; model.busy = false }
             do {
                 if let plan, let folder {
-                    try await model.lock(plan: plan, folder: folder, password: entered)
-                    model.notice = entered == nil ? "鍵なしに変更しました。" : "鍵を設定し、フォルダを隠しました。"
+                    try await model.lock(plan: plan, folder: folder, password: entered, reuseExistingPIN: reuseExistingPIN)
+                    model.notice = entered == nil && !reuseExistingPIN ? "鍵なしに変更しました。" : "鍵を設定し、フォルダを隠しました。"
                 } else {
                     try await model.unlock(entered ?? "")
                     model.notice = "鍵を解除しました。フォルダを表示しています。"
@@ -423,7 +424,7 @@ struct FolderPasswordSheet: View {
         }
     }
     private var pinHint: String? {
-        guard plan != nil else { return nil }
+        guard plan != nil, specifyPIN else { return nil }
         if password.isEmpty { return "半角数字6桁を入力し、確認欄にも同じPINを入力してください。" }
         if !password.utf8.allSatisfy({ (48...57).contains($0) }) { return "半角の数字だけを使ってください。全角数字・空白は使えません。" }
         if password.count != 6 { return "PINは6桁です（現在\(password.count)桁）。" }
@@ -435,8 +436,14 @@ struct FolderPasswordSheet: View {
         VStack(alignment: .leading, spacing: 18) {
             Text(plan == nil ? "隠したフォルダを開く" : "フォルダの鍵").font(.title2)
             if plan != nil { Text(folderLocked ? "現在：鍵あり（解除中）" : "現在：このフォルダ自身の鍵なし") }
+            if plan != nil { Toggle("PINを指定する", isOn: $specifyPIN) }
+            if plan == nil || specifyPIN {
             SecureField(plan == nil ? "PIN（以前のパスワードも使用可）" : "PIN（半角数字6桁）", text: $password)
-            if plan != nil { SecureField("もう一度", text: $confirmation); Text("このフォルダと子の中身を隠します。設定は非公開S3へ保存し、iPhoneにも反映します。原本は変更しません。") }
+            if plan != nil { SecureField("もう一度", text: $confirmation) }
+            }
+            if plan != nil {
+                if !specifyPIN { Text("既存のフォルダ用PINで鍵を設定します。開くときは同じPINを使います。") }
+                Text("このフォルダと子の中身を隠します。設定は非公開S3へ保存し、iPhoneにも反映します。原本は変更しません。") }
             else { Text("同じパスワードのフォルダを解除します。最長5分、アプリを離れると再ロックします。") }
             if let pinHint { Text(pinHint).font(.callout).foregroundStyle(.secondary) }
             if processing {
@@ -451,9 +458,9 @@ struct FolderPasswordSheet: View {
                 }
                 Button(processing ? "処理中…" : (plan == nil ? "解除" : "設定して隠す")) {
                     let entered = password; password = ""; confirmation = ""
-                    submit(entered)
+                    submit(entered, reuseExistingPIN: plan != nil && !specifyPIN)
                 }.buttonStyle(.borderedProminent)
-                    .disabled(password.isEmpty || (plan != nil && (password.count != 6 || !password.utf8.allSatisfy { (48...57).contains($0) } || password != confirmation)))
+                    .disabled((plan == nil || specifyPIN) && (password.isEmpty || (plan != nil && (password.count != 6 || !password.utf8.allSatisfy { (48...57).contains($0) } || password != confirmation))))
             }.disabled(model.busy || processing)
             if !operationError.isEmpty { Label(operationError, systemImage: "exclamationmark.circle").foregroundStyle(.red) }
         }.padding(28).frame(width: 460)
@@ -467,12 +474,14 @@ struct MediaScreen: View {
     let name: String
     var showSave = true
     @State private var image: NSImage?
+    @State private var pdf: Data?
     @State private var player: AVPlayer?
     @State private var temporary: URL?
     @State private var error = ""
     var body: some View {
         VStack {
-            if let image { Image(nsImage: image).resizable().scaledToFit() }
+            if let pdf { MediaPDFReader(data: pdf) }
+            else if let image { Image(nsImage: image).resizable().scaledToFit() }
             else if let player { VideoPlayer(player: player) }
             else if !error.isEmpty { Text(error).foregroundStyle(.red) }
             else { ProgressView("読み込み中…") }
@@ -485,11 +494,12 @@ struct MediaScreen: View {
                 guard !Task.isCancelled, identity == model.privacyID else { try? FileManager.default.removeItem(at: file); return }
                 temporary = file
                 if isVideo(name) { player = AVPlayer(url: file); model.recordVideoStart() }
+                else if URL(fileURLWithPath: name).pathExtension.lowercased() == "pdf" { pdf = try Data(contentsOf: file) }
                 else if let loaded = NSImage(contentsOf: file) { image = loaded }
                 else { error = "この形式は表示できません。" }
             } catch { if identity == model.privacyID { self.error = error.localizedDescription; model.handle(error) } }
         }
-        .onDisappear { player?.pause(); player = nil; image = nil; if let temporary { try? FileManager.default.removeItem(at: temporary) }; temporary = nil }
+        .onDisappear { player?.pause(); player = nil; image = nil; pdf = nil; if let temporary { try? FileManager.default.removeItem(at: temporary) }; temporary = nil }
     }
 }
 struct LightVideoScreen: View {

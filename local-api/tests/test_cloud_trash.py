@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+import threading
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -52,6 +53,39 @@ class CloudTrashTests(unittest.TestCase):
 
     def mutate(self, action, **fields):
         return self.trash.mutate(self.plan['id'], dict(action=action, confirm=True, **fields))
+
+    def test_library_cache_expires_and_mutation_invalidates(self):
+        with patch.object(self.trash, 'load', wraps=self.trash.load) as load:
+            with patch('vault.cloud_trash.time.monotonic', return_value=100):
+                self.trash.sync_library()
+                self.trash.sync_library()
+                self.assertEqual(load.call_count, 1)
+            with patch('vault.cloud_trash.time.monotonic', return_value=131):
+                self.trash.sync_library()
+                self.assertEqual(load.call_count, 2)
+                self.mutate('trash', itemIds=[self.plan['items'][0]['id']], folderId=None)
+                before = load.call_count
+                self.trash.sync_library()
+                self.assertEqual(load.call_count, before + 1)
+
+    def test_failed_library_read_is_not_cached(self):
+        with patch.object(self.trash, 'load', side_effect=VaultError('cloud_error', 'offline', 502)) as load:
+            for _ in range(2):
+                with self.assertRaises(VaultError):
+                    self.trash.sync_library()
+            self.assertEqual(load.call_count, 2)
+
+    def test_library_fetches_three_catalogs_concurrently(self):
+        barrier = threading.Barrier(3, timeout=5)
+        plans = [{'id': str(index)} for index in range(6)]
+        def fetch(plan):
+            barrier.wait()
+            return plan
+        with patch.object(self.uploads, 'list', return_value=plans), \
+             patch.object(self.uploads, 'read', side_effect=lambda key: {'id': key}), \
+             patch.object(self.trash, 'sync_cached', side_effect=fetch) as sync:
+            self.trash.sync_library()
+        self.assertEqual(sync.call_count, 6)
 
     def item_trash(self):
         self.mutate('trash', itemIds=[self.plan['items'][0]['id']], folderId=None)

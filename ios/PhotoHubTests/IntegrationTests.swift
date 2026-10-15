@@ -1,5 +1,6 @@
 import XCTest
 import UIKit
+import PDFKit
 import ImageIO
 import AVFoundation
 import PhotoHubCore
@@ -9,6 +10,120 @@ import CryptoKit
 
 @MainActor
 final class IntegrationTests: XCTestCase {
+    func testPDFDownloadIntegrityRelockAndMemoryDecryption() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ReaderBatchProtocol.self]
+        let authentication = Authentication(network: URLSession(configuration: configuration), storage: FixtureRefreshTokens())
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = CloudViewerModel(cacheRoot: directory, authentication: authentication, networkConfiguration: configuration)
+        model.configuration.api = "https://fixture.invalid"; model.configuration.domain = "https://fixture.invalid"
+        model.configuration.clientID = "test-client"; model.configuration.owner = UUID().uuidString; model.signedIn = true
+        let bytes = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 300, height: 400)).pdfData { context in
+            for title in ["First page", "Second page"] {
+                context.beginPage()
+                (title as NSString).draw(at: CGPoint(x: 20, y: 20), withAttributes: [.font: UIFont.systemFont(ofSize: 20)])
+            }
+        }
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let catalog = try JSONDecoder().decode(ReadCatalog.self, from: JSONSerialization.data(withJSONObject: [
+            "id": "catalog", "rootId": "root", "name": "PDF",
+            "folders": [["id": "folder", "name": "Folder", "parentId": NSNull(), "isLocked": false]],
+            "items": [["id": "item", "name": "Book.pdf", "folderId": "folder", "sha256": digest,
+                       "mimeType": "application/pdf", "byteSize": bytes.count, "hasThumbnail": false]]
+        ]))
+        model.catalogs[model.catalogKey("root", "catalog")] = catalog
+        ReaderBatchProtocol.imageData = bytes
+        let downloaded = try await model.pdfData(catalog, catalog.items[0])
+        let document = try XCTUnwrap(PDFDocument(data: downloaded))
+        XCTAssertEqual(document.pageCount, 2)
+        XCTAssertTrue(document.page(at: 1)?.string?.contains("Second page") == true)
+        XCTAssertNotNil(document.page(at: 1)?.thumbnail(of: CGSize(width: 100, height: 100), for: .mediaBox).cgImage)
+        ReaderBatchProtocol.imageData = Data(repeating: 0, count: bytes.count)
+        do { _ = try await model.pdfData(catalog, catalog.items[0]); XCTFail("Damaged PDF must fail integrity") }
+        catch ViewerError.integrity { }
+        model.relock()
+        do { _ = try await model.pdfData(catalog, catalog.items[0]); XCTFail("Relock must reject old PDF access") }
+        catch ViewerError.login { }
+        let key = Data(repeating: 0x21, count: 32), id = UUID().uuidString
+        let header = try SealedMedia.header(length: Int64(bytes.count), objectID: id)
+        let cipher = header.data + (try SealedMedia.sealChunk(bytes, index: 0, header: header, master: key))
+        let reader = SealedRangeReader(objectID: id, master: key, expectedLength: Int64(bytes.count)) { range in
+            cipher.subdata(in: Int(range.lowerBound)..<Int(range.upperBound))
+        }
+        let restored = try await reader.allData()
+        XCTAssertEqual(restored, bytes)
+        XCTAssertEqual(PDFDocument(data: restored)?.pageCount, 2)
+        await reader.close()
+    }
+
+    func testSwipePrefetchStopsAtTenSkipsVideosAndReusesCache() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ReaderBatchProtocol.self]
+        let authentication = Authentication(network: URLSession(configuration: configuration), storage: FixtureRefreshTokens())
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = CloudViewerModel(cacheRoot: directory, authentication: authentication, networkConfiguration: configuration)
+        model.configuration.api = "https://fixture.invalid"
+        model.configuration.domain = "https://fixture.invalid"
+        model.configuration.clientID = "test-client"
+        model.configuration.owner = UUID().uuidString
+        model.signedIn = true
+        let bytes = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).image { _ in }.pngData())
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let catalog = try JSONDecoder().decode(ReadCatalog.self, from: JSONSerialization.data(withJSONObject: [
+            "id": "catalog", "rootId": "root", "name": "Test",
+            "folders": [["id": "folder", "name": "Folder", "parentId": NSNull(), "isLocked": false]],
+            "items": (0..<35).map { index in
+                ["id": "item-\(index)", "name": "Media", "folderId": "folder", "sha256": digest,
+                 "mimeType": index % 2 == 0 ? "image/png" : "video/mp4", "byteSize": bytes.count,
+                 "hasThumbnail": true] as [String: Any]
+            }
+        ]))
+        model.catalogs[model.catalogKey("root", "catalog")] = catalog
+        let entries = catalog.items.map { ReaderEntry(catalog: catalog, item: $0) }
+        XCTAssertEqual(ReaderSwipeScreen.upcomingPhotos(entries, after: 0).map { $0.item.id },
+                       stride(from: 2, through: 20, by: 2).map { "item-\($0)" })
+        XCTAssertTrue(ReaderSwipeScreen.upcomingPhotos(entries, after: 34).isEmpty)
+        XCTAssertTrue(ReaderSwipeScreen.upcomingPhotos([], after: 0).isEmpty)
+        ReaderBatchProtocol.imageCount = 0
+        ReaderBatchProtocol.imageData = bytes
+        let cancelled = Task { await model.prefetchSwipeImages(entries, after: 0) }
+        cancelled.cancel()
+        await cancelled.value
+        XCTAssertEqual(ReaderBatchProtocol.imageCount, 0)
+        await model.prefetchSwipeImages(entries, after: 0)
+        XCTAssertEqual(ReaderBatchProtocol.imageCount, 10, "Never download the entire queue")
+        _ = try await model.image(catalog, catalog.items[2])
+        await model.prefetchSwipeImages(entries, after: 0)
+        XCTAssertEqual(ReaderBatchProtocol.imageCount, 10, "Display and repeated prefetch reuse the cache")
+        await model.prefetchSwipeImages(entries, after: 2)
+        XCTAssertEqual(ReaderBatchProtocol.imageCount, 11, "Moving adds only the new photo in the window")
+        model.relock()
+        await model.prefetchSwipeImages(entries, after: 22)
+        XCTAssertEqual(ReaderBatchProtocol.imageCount, 11, "Relocking prevents further downloads")
+    }
+    func testOverviewSeparatesMediaAndKeepsIdentityAcrossFolders() throws {
+        func catalog(_ id: String) throws -> ReadCatalog {
+            try JSONDecoder().decode(ReadCatalog.self, from: JSONSerialization.data(withJSONObject: [
+                "id": id, "rootId": "root", "name": "Library", "folders": [],
+                "items": ["image/jpeg", "video/mp4", "application/pdf"].enumerated().map { index, mime in
+                    ["id": "item-\(index)", "name": "Media", "folderId": "folder", "sha256": String(repeating: "a", count: 64),
+                     "mimeType": mime, "byteSize": 1, "hasThumbnail": true] as [String: Any]
+                }
+            ]))
+        }
+        let first = try catalog("one"), second = try catalog("two")
+        XCTAssertEqual(first.items.filter { ReaderOverviewMode.photos.includes($0) }.count, 1)
+        XCTAssertEqual(first.items.filter { ReaderOverviewMode.videos.includes($0) }.count, 1)
+        XCTAssertEqual(first.items.filter { ReaderOverviewMode.swipe.includes($0) }.count, 2)
+        XCTAssertNotEqual(ReaderEntry(catalog: first, item: first.items[0]).id,
+                          ReaderEntry(catalog: second, item: second.items[0]).id)
+        let refreshed = try catalog("one")
+        XCTAssertEqual(ReaderEntry(catalog: first, item: first.items[0]).id,
+                       ReaderEntry(catalog: refreshed, item: refreshed.items[0]).id)
+    }
+
     func testFullScreenPhotoZoomCentersAndSeparatesPagingFromPanning() {
         let image = UIGraphicsImageRenderer(size: CGSize(width: 400, height: 200)).image { context in
             UIColor.white.setFill(); context.fill(CGRect(x: 0, y: 0, width: 400, height: 200))
@@ -34,6 +149,17 @@ final class IntegrationTests: XCTestCase {
         scroll.frame.size = CGSize(width: 600, height: 300)
         scroll.setNeedsLayout(); scroll.layoutIfNeeded()
         XCTAssertEqual(scroll.imageView.frame.size, CGSize(width: 600, height: 300))
+    }
+
+    func testPhotoPagingAllowsOneFingerButRejectsPinchAndZoomedPan() {
+        let allowsPaging = PhoneZoomableImage.Coordinator.allowsPaging
+        XCTAssertTrue(allowsPaging(1, 1, .possible), "One finger tracked by the pinch recognizer must still page")
+        XCTAssertFalse(allowsPaging(1, 2, .possible), "Two fingers are reserved for pinch")
+        XCTAssertFalse(allowsPaging(1, 1, .began))
+        XCTAssertFalse(allowsPaging(1, 1, .changed), "Lifting one pinch finger must not page")
+        XCTAssertFalse(allowsPaging(3, 1, .possible), "Zoomed images pan instead of paging")
+        XCTAssertFalse(allowsPaging(0.9, 2, .changed), "Pinching below minimum during bounce must not page")
+        XCTAssertTrue(allowsPaging(1, 1, .ended), "Paging resumes after returning to minimum zoom")
     }
 
     func testReaderRequestGateCancellationDoesNotReserveFutureSlots() async throws {
@@ -81,8 +207,21 @@ final class IntegrationTests: XCTestCase {
         XCTAssertEqual(ReaderBatchProtocol.batchCount, 1)
         _ = try await model.mediaURL(catalog, catalog.items[0], thumbnail: true)
         XCTAssertEqual(ReaderBatchProtocol.batchCount, 1)
-        let images = (0..<12).map { _ in Task { try await model.image(catalog, catalog.items[0], thumbnail: true) } }
+        var statuses = Array(repeating: [String](), count: 12)
+        let images = (0..<12).map { index in
+            Task {
+                try await model.image(catalog, catalog.items[0], thumbnail: true) { status in
+                    statuses[index].append(status)
+                }
+            }
+        }
         for task in images { _ = try await task.value }
+        for updates in statuses {
+            XCTAssertEqual(updates.first, "保存済みの画像を確認中…")
+            XCTAssertTrue(updates.contains("画像を受信中…"))
+            XCTAssertTrue(updates.contains("画像を照合・表示準備中…"))
+            XCTAssertEqual(updates.last, "画像を端末にキャッシュ中…")
+        }
         XCTAssertEqual(ReaderBatchProtocol.imageCount, 1)
         _ = try await model.image(catalog, catalog.items[0], thumbnail: true)
         XCTAssertEqual(ReaderBatchProtocol.imageCount, 1)
@@ -122,7 +261,9 @@ final class IntegrationTests: XCTestCase {
         try bytes.write(to: disk.file(id: key, kind: .display))
         let cached = try await model.catalog(root)
         XCTAssertEqual(cached.id, catalog.id)
-        let image = try await model.image(catalog, catalog.items[0])
+        var statuses: [String] = []
+        let image = try await model.image(catalog, catalog.items[0]) { statuses.append($0) }
+        XCTAssertEqual(statuses, ["保存済みの画像を確認中…"], "Cached images must not report a network download")
         XCTAssertEqual(image.size, try XCTUnwrap(UIImage(data: bytes)).size)
         var lockedJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(catalog)) as? [String: Any])
         lockedJSON["folders"] = [["id": "folder", "name": "Folder", "parentId": NSNull(), "isLocked": true]]
@@ -403,6 +544,9 @@ private final class ReaderBatchProtocol: URLProtocol {
         } else if request.url!.path.hasPrefix("/image/") {
             Self.imageCount += 1
             data = Self.imageData
+        } else if request.url!.path.contains("/items/") {
+            let id = request.url!.deletingLastPathComponent().lastPathComponent
+            data = try! JSONSerialization.data(withJSONObject: ["url": "https://fixture.s3.ap-northeast-1.amazonaws.com/image/" + id, "expiresIn": 300])
         } else {
             Self.batchCount += 1
             let ids = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!.first { $0.name == "thumbnailIds" }!.value!.split(separator: ",")

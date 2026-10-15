@@ -8,6 +8,7 @@ import tempfile
 import threading
 import uuid
 import time
+import copy
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'backend'))
 import folder_security as security
@@ -20,6 +21,7 @@ class FolderPrivacy:
         self.uploads = uploads
         self.lock = threading.RLock()
         self.last_unlock = 0
+        self.settings_cache = None
 
     def destination(self):
         plans = self.uploads.list()
@@ -31,7 +33,23 @@ class FolderPrivacy:
         plan = plans[0]
         return self.uploads.client_factory(plan['bucket'], plan['profile'], plan['region'])
 
-    def load(self):
+    def load(self, cached=False):
+        with self.lock:
+            destinations = frozenset((p['bucket'], p['profile'], p['region']) for p in self.uploads.list())
+            if cached and self.settings_cache:
+                destination, expires, value = self.settings_cache
+                if destinations == destination and time.monotonic() < expires:
+                    client, settings, etag = value
+                    return client, copy.deepcopy(settings), etag
+            # Forced reads and failed refreshes must never leave an older entry usable.
+            self.settings_cache = None
+            value = self._load()
+            if cached:
+                client, settings, etag = value
+                self.settings_cache = (destinations, time.monotonic() + 10, (client, copy.deepcopy(settings), etag))
+            return value
+
+    def _load(self):
         client = self.destination()
         head = client.head(security.KEY)
         if not head or not 0 < head.get('ContentLength', 0) <= 65536:
@@ -53,7 +71,7 @@ class FolderPrivacy:
     def library(self, token):
         if not self.uploads.list():
             return []
-        _, settings, _ = self.load()
+        _, settings, _ = self.load(cached=True)
         results = []
         for summary in self.uploads.library():
             plan = self.uploads.read(summary['id'])
@@ -79,7 +97,7 @@ class FolderPrivacy:
     def plans(self, token):
         if not self.uploads.list():
             return []
-        _, settings, _ = self.load()
+        _, settings, _ = self.load(cached=True)
         results = []
         for summary in self.uploads.list():
             value = self.visible(self.uploads.read(summary['id']), settings, token)
@@ -122,7 +140,9 @@ class FolderPrivacy:
             raise VaultError('folder_locked', '先に鍵付きフォルダを解除してください。', 403)
 
     def set(self, body, token):
-        if set(body) != {'planId', 'folderId', 'password', 'confirmSave'} or body['confirmSave'] is not True:
+        reuse = body.get('reuseExistingPIN') is True
+        expected = {'planId', 'folderId', 'confirmSave', 'reuseExistingPIN'} if reuse else {'planId', 'folderId', 'password', 'confirmSave'}
+        if set(body) != expected or body['confirmSave'] is not True:
             raise VaultError('invalid_request', '鍵設定の保存を確認してください。')
         with self.lock:
             client, settings, etag = self.load()
@@ -131,7 +151,13 @@ class FolderPrivacy:
             if value is None or not any(folder['id'] == body['folderId'] for folder in value['folders']):
                 raise VaultError('not_found', '先にフォルダを解除してください。', 404)
             locks = [lock for lock in settings['locks'] if lock['folderId'] != body['folderId']]
-            if body['password'] is not None:
+            if reuse:
+                credentials = {(entry['salt'], entry['verifier']) for entry in settings['locks']}
+                if len(credentials) != 1:
+                    raise VaultError('common_pin_required', '共通に使うフォルダ用PINを特定できません。「PINを指定する」から設定してください。', 409)
+                salt, verifier = next(iter(credentials))
+                locks.append(dict(rootId=plan['rootId'], folderId=body['folderId'], salt=salt, verifier=verifier))
+            elif body['password'] is not None:
                 try:
                     locks.append(security.make_lock(plan['rootId'], body['folderId'], body['password']))
                 except ValueError:

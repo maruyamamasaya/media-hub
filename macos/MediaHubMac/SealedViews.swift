@@ -184,7 +184,7 @@ struct SealedThumbnail: View {
     var body: some View {
         Group {
             if let image { Image(nsImage: image).resizable().scaledToFill() }
-            else { Image(systemName: item.mimeType.hasPrefix("video/") ? "play.rectangle" : "photo").font(.system(size: 32)).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
+            else { Image(systemName: item.mimeType == "application/pdf" ? "doc.richtext" : (item.mimeType.hasPrefix("video/") ? "play.rectangle" : "photo")).font(.system(size: 32)).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
         }.task {
             guard let id = item.thumbnailID, let bytes = item.thumbnailBytes else { return }
             let identity = model.privacyID
@@ -250,6 +250,7 @@ struct SealedMediaScreen: View {
     let root: SealedRoot; let item: SealedItem; let secret: MediaSecret
     var showHeader = true
     @State private var image: NSImage?
+    @State private var pdf: Data?
     @State private var player: AVPlayer?
     @State private var loader: SealedPlayerLoader?
     @State private var reader: SealedRangeReader?
@@ -258,25 +259,31 @@ struct SealedMediaScreen: View {
         VStack {
             if showHeader { HStack { Button("閉じる") { dismiss() }.keyboardShortcut(.cancelAction); Spacer(); Text(item.name).lineLimit(1); Spacer() }.padding() }
             Group {
-                if let image { Image(nsImage: image).resizable().scaledToFit() }
+                if let pdf { MediaPDFReader(data: pdf) }
+                else if let image { Image(nsImage: image).resizable().scaledToFit() }
                 else if let player { VideoPlayer(player: player) }
                 else if !error.isEmpty { Text(error).foregroundStyle(.red) }
                 else { ProgressView("復号して読み込み中…") }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }.frame(maxWidth: .infinity, maxHeight: .infinity).task {
             let identity = model.privacyID
-            let reader = macSealedReader(model, root: root, secret: secret, objectID: item.objectID, length: item.byteSize, maximum: item.mimeType.hasPrefix("video/") ? 5 * 1024 * 1024 * 1024 : 100 * 1024 * 1024)
+            let reader = macSealedReader(model, root: root, secret: secret, objectID: item.objectID, length: item.byteSize, maximum: item.mimeType.hasPrefix("video/") ? 5 * 1024 * 1024 * 1024 : (item.mimeType == "application/pdf" ? PDFLimits.maximumBytes : 100 * 1024 * 1024))
             self.reader = reader
             do {
                 if item.mimeType.hasPrefix("video/") {
                     let loader = SealedPlayerLoader(reader: reader, mime: item.mimeType)
                     if identity == model.privacyID, !Task.isCancelled { self.loader = loader; player = AVPlayer(playerItem: AVPlayerItem(asset: loader.asset)); model.recordVideoStart() }
                 } else {
-                    let data = try await reader.allData()
-                    guard SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == item.sha256, let image = NSImage(data: data) else { throw SealedError.invalid }
-                    if identity == model.privacyID, !Task.isCancelled { self.image = image }
+                    let data = try await reader.allData(maximumBytes: item.mimeType == "application/pdf" ? PDFLimits.maximumBytes : 100 * 1024 * 1024)
+                    guard SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == item.sha256 else { throw SealedError.invalid }
+                    guard identity == model.privacyID, !Task.isCancelled else { return }
+                    if item.mimeType == "application/pdf" { pdf = data }
+                    else {
+                        guard let image = NSImage(data: data) else { throw SealedError.invalid }
+                        self.image = image
+                    }
                 }
             } catch { if identity == model.privacyID { self.error = error.localizedDescription; model.handle(error) } }
-        }.onDisappear { player?.pause(); player = nil; loader?.close(); loader = nil; image = nil; if let reader { Task { await reader.close() } }; reader = nil }
+        }.onDisappear { player?.pause(); player = nil; loader?.close(); loader = nil; image = nil; pdf = nil; if let reader { Task { await reader.close() } }; reader = nil }
     }
 }

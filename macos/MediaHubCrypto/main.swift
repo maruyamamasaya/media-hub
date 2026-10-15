@@ -1,8 +1,18 @@
 import Foundation
 import PhotoHubCore
 import CryptoKit
+import PDFKit
+import AppKit
 struct Request: Decodable { let source: String; let output: String; let objectID: String; let masterKey: String }
 do {
+    if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--pdf-thumbnail" {
+        guard let document = PDFDocument(url: URL(fileURLWithPath: CommandLine.arguments[2])),
+              !document.isLocked, let page = document.page(at: 0),
+              let tiff = page.thumbnail(of: NSSize(width: 320, height: 320), for: .mediaBox).tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) else { throw SealedError.invalid }
+        try png.write(to: URL(fileURLWithPath: CommandLine.arguments[3]))
+        exit(0)
+    }
     let data = FileHandle.standardInput.readDataToEndOfFile()
     guard data.count <= 65536 else { throw SealedError.invalid }
     let request = try JSONDecoder().decode(Request.self, from: data)

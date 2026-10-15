@@ -85,10 +85,11 @@ public actor SealedRangeReader {
         }
         return result
     }
-    public func allData() async throws -> Data {
+    public func allData(maximumBytes: Int64 = 100 * 1024 * 1024) async throws -> Data {
         let size = try await length()
-        guard size <= 100 * 1024 * 1024 else { throw SealedError.tooLarge }
+        guard size <= maximumBytes else { throw SealedError.tooLarge }
         var bytes = Data(), cursor: Int64 = 0
+        bytes.reserveCapacity(Int(size))
         while cursor < size {
             let part = try await read(offset: cursor, count: Int(min(Int64(SealedMedia.chunkSize), size - cursor)))
             bytes.append(part); cursor += Int64(part.count)

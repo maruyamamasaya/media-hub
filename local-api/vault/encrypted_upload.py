@@ -165,6 +165,11 @@ class EncryptedUploads:
                     if result.returncode:
                         return False
                     input_file = target
+                elif mime == 'application/pdf':
+                    from .pdf_preview import render_pdf
+                    if not render_pdf(source, target):
+                        return False
+                    input_file = target
                 elif mime.startswith('image/'):
                     input_file = source
                 else:

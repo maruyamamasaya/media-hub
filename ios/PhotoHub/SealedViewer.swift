@@ -72,7 +72,7 @@ struct PhoneSealedLibrary: View {
                 if !model.signedIn { Text("「見る」から本人ログインしてください。") }
                 else {
                     if let secret {
-                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 20) {
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 14) {
                             ForEach(roots.filter { $0.keyID == secret.keyID }) { root in PhoneSealedRootRow(root: root, secret: secret) }
                         }
                         if roots.filter({ $0.keyID == secret.keyID }).isEmpty { ContentUnavailableView("フォルダはまだありません", systemImage: "folder") }
@@ -81,7 +81,7 @@ struct PhoneSealedLibrary: View {
                 }
                 if !error.isEmpty { Text(error).foregroundStyle(.red) }
             }.padding(16)
-        }.navigationTitle("暗号化フォルダ").task { await load() }
+        }.navigationTitle("暗号化フォルダ").navigationBarTitleDisplayMode(.inline).task { await load() }
             .refreshable { await load() }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in Task { await load() } }
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("MediaHubEncryptionKeyChanged"))) { _ in Task { await load() } }
@@ -138,7 +138,7 @@ struct PhoneSealedFolderTile: View {
                 if let cover { PhoneSealedThumbnail(root: root, item: cover, secret: secret) }
                 else { ZStack { Color.secondary.opacity(0.10); Image(systemName: "folder.fill").font(.largeTitle).foregroundStyle(.secondary) }.aspectRatio(1, contentMode: .fit) }
             }.clipShape(RoundedRectangle(cornerRadius: 16))
-            Text(name).font(.subheadline.weight(.medium)).lineLimit(2).foregroundStyle(.primary)
+            Text(name).font(.caption.weight(.medium)).lineLimit(2).foregroundStyle(.primary)
         }.accessibilityElement(children: .combine)
     }
 }
@@ -151,7 +151,7 @@ struct PhoneSealedFolder: View {
             VStack(spacing: 16) {
                 let children = catalog.folders.filter { $0.parentId == folderID }
                 if !children.isEmpty {
-                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 14) {
                         ForEach(children) { folder in
                             NavigationLink { PhoneSealedFolder(root: root, catalog: catalog, secret: secret, folderID: folder.id) } label: {
                                 PhoneSealedFolderTile(root: root, catalog: catalog, secret: secret, name: folder.name, folderID: folder.id)
@@ -162,7 +162,7 @@ struct PhoneSealedFolder: View {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 3), spacing: 2) {
                     ForEach(items) { item in
                         Button { selected = item } label: { PhoneSealedThumbnail(root: root, item: item, secret: secret) }
-                            .buttonStyle(.plain).accessibilityLabel(item.mimeType.hasPrefix("video/") ? "動画" : "写真")
+                            .buttonStyle(.plain).accessibilityLabel(item.mimeType == "application/pdf" ? item.name : (item.mimeType.hasPrefix("video/") ? "動画" : "写真"))
                     }
                 }
                 if children.isEmpty && items.isEmpty { ContentUnavailableView("空のフォルダ", systemImage: "folder") }
@@ -211,7 +211,11 @@ struct PhoneSealedThumbnail: View {
             ZStack(alignment: .bottomTrailing) {
                 Color.secondary.opacity(0.10)
                 if let image { Image(uiImage: image).resizable().scaledToFill().frame(width: geometry.size.width, height: geometry.size.height).clipped() }
-                else { Image(systemName: item.mimeType.hasPrefix("video/") ? "play.rectangle" : "photo").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
+                else { Image(systemName: item.mimeType == "application/pdf" ? "doc.richtext" : (item.mimeType.hasPrefix("video/") ? "play.rectangle" : "photo")).foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
+                if item.mimeType == "application/pdf" {
+                    Text(item.name).font(.caption2).lineLimit(2).foregroundStyle(.white).padding(5)
+                        .frame(maxWidth: .infinity).background(.black.opacity(0.65))
+                }
                 if item.mimeType.hasPrefix("video/") { Image(systemName: "play.fill").font(.caption).foregroundStyle(.white).padding(7).background(.black.opacity(0.45), in: Circle()).padding(6) }
             }
         }.aspectRatio(1, contentMode: .fit).task {
@@ -227,33 +231,43 @@ struct PhoneSealedMedia: View {
     @EnvironmentObject private var model: CloudViewerModel
     let root: SealedRoot; let item: SealedItem; let secret: MediaSecret
     @State private var image: UIImage?
+    @State private var pdf: Data?
     @State private var player: AVPlayer?
     @Binding var controls: Bool
     let onSwipe: (Int) -> Void
     @State private var loader: SealedPlayerLoader?
     @State private var reader: SealedRangeReader?
     @State private var error = ""
+    @State private var loadingStatus = "暗号化データの読み込みを準備中…"
     var body: some View {
         Group {
-            if let image { PhoneZoomableImage(image: image, onTap: { controls.toggle() }, onSwipe: onSwipe) }
-            else if let player { VideoPlayer(player: player) }
+            if let pdf { MediaPDFReader(data: pdf).padding(.top, 64) }
+            else if let image { PhoneZoomableImage(image: image, onTap: { controls.toggle() }, onSwipe: onSwipe) }
+            else if let player { ReaderVideoPlayer(player: player).id(ObjectIdentifier(player)) }
             else if !error.isEmpty { Text(error).foregroundStyle(.red) }
-            else { ProgressView().tint(.white) }
+            else { ReaderLoadingView(status: loadingStatus) }
         }.task {
             let identity = model.sessionID
-            let reader = phoneSealedReader(model, root: root, secret: secret, objectID: item.objectID, length: item.byteSize, maximum: item.mimeType.hasPrefix("video/") ? 5 * 1024 * 1024 * 1024 : 100 * 1024 * 1024)
+            let reader = phoneSealedReader(model, root: root, secret: secret, objectID: item.objectID, length: item.byteSize, maximum: item.mimeType.hasPrefix("video/") ? 5 * 1024 * 1024 * 1024 : (item.mimeType == "application/pdf" ? PDFLimits.maximumBytes : 100 * 1024 * 1024))
             self.reader = reader
             do {
                 if item.mimeType.hasPrefix("video/") {
                     let loader = SealedPlayerLoader(reader: reader, mime: item.mimeType)
                     if identity == model.sessionID, !Task.isCancelled { self.loader = loader; player = AVPlayer(playerItem: AVPlayerItem(asset: loader.asset)); model.recordVideoStart() }
                 } else {
-                    let bytes = try await reader.allData()
-                    guard SHA256.hash(data: bytes).map({ String(format: "%02x", $0) }).joined() == item.sha256, let value = UIImage(data: bytes) else { throw SealedError.invalid }
-                    if identity == model.sessionID, !Task.isCancelled { image = value }
+                    loadingStatus = item.mimeType == "application/pdf" ? "PDFを受信・復号中…" : "画像を受信・復号中…"
+                    let bytes = try await reader.allData(maximumBytes: item.mimeType == "application/pdf" ? PDFLimits.maximumBytes : 100 * 1024 * 1024)
+                    loadingStatus = "照合・表示準備中…"
+                    guard SHA256.hash(data: bytes).map({ String(format: "%02x", $0) }).joined() == item.sha256 else { throw SealedError.invalid }
+                    guard identity == model.sessionID, !Task.isCancelled else { return }
+                    if item.mimeType == "application/pdf" { pdf = bytes }
+                    else {
+                        guard let value = UIImage(data: bytes) else { throw SealedError.invalid }
+                        image = value
+                    }
                 }
-            } catch { if identity == model.sessionID { self.error = "鍵・通信・画像サイズを確認してください。" } }
-        }.onDisappear { player?.pause(); player = nil; loader?.close(); loader = nil; image = nil; if let reader { Task { await reader.close() } }; reader = nil }
+            } catch { if identity == model.sessionID { self.error = "鍵・通信・ファイルサイズを確認してください。" } }
+        }.onDisappear { player?.pause(); player = nil; loader?.close(); loader = nil; image = nil; pdf = nil; if let reader { Task { await reader.close() } }; reader = nil }
     }
 }
 

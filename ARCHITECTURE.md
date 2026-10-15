@@ -50,6 +50,8 @@ SQLite → JSON正常版 + latestポインター → 空SQLiteへの復元
 
 iOS通常閲覧はCloudViewerModel → メモリ／ReaderImageDiskStore専用actorの最大1GBキャッシュ → 未取得サムネイルの最大60件一括署名 → 非公開S3。署名要求と同一画像の同時取得を共有し、ディスク／原本照合をUIから分離する。暗号化内容はメモリのみ。[キャッシュと一括署名](docs/S3-READER.md)。
 
+PDFは共通`MediaPDFReader`（PDFKit）でMac／iPhoneに表示する。通常・暗号化の既存送信経路を使い、Mac同梱helperで先頭ページの小画像を作る。暗号化PDFの閲覧はメモリ復号のみ。[PDF仕様](docs/PDF-SUPPORT.md)。
+
 ## API Structure
 新Webは `/api/v1` のassets/imports/tags/collections/status。ファイルはAsset/File ID経由。更新はrevisionで409競合を検出。一覧は検索条件に結び付いたcursorでページ分割。正本は [共通契約](contracts/README.md)。
 

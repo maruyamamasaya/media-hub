@@ -234,8 +234,11 @@ final class MacModel: ObservableObject {
         // poll refreshes the library without blocking upload controls.
         // The cookie and all visible private data have already been cleared.
     }
-    func lock(plan: String, folder: String, password: String?) async throws {
-        try await runtime.action("/folder-locks/settings", body: ["planId": plan, "folderId": folder, "password": password as Any? ?? NSNull(), "confirmSave": true])
+    func lock(plan: String, folder: String, password: String?, reuseExistingPIN: Bool = false) async throws {
+        var body: [String: Any] = ["planId": plan, "folderId": folder, "confirmSave": true]
+        if reuseExistingPIN { body["reuseExistingPIN"] = true }
+        else { body["password"] = password as Any? ?? NSNull() }
+        try await runtime.action("/folder-locks/settings", body: body)
         await relock()
     }
     func choose(directory: Bool) -> URL? {

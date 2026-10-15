@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import tempfile
 import uuid
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from .folder_upload import atomic_json
@@ -16,6 +18,24 @@ import catalog_trash
 class CloudTrash:
     def __init__(self, uploads):
         self.uploads = uploads
+        self.synced = {}
+
+    def sync_library(self):
+        # Keep the same exclusion against upload/trash writes, but fetch independent
+        # catalogs concurrently. Only successful reads earn a short-lived cache.
+        with self.uploads.lock:
+            plans = [self.uploads.read(p['id']) for p in self.uploads.list()]
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                list(pool.map(self.sync_cached, plans))
+
+    def sync_cached(self, plan):
+        key = (plan['bucket'], plan['profile'], plan['region'], plan['id'])
+        if time.monotonic() < self.synced.get(key, 0):
+            return plan
+        result = self.sync(plan)
+        if plan['state'] == 'complete':
+            self.synced[key] = time.monotonic() + 30
+        return result
 
     def load(self, plan):
         client = self.uploads.client_factory(plan['bucket'], plan['profile'], plan['region'])
@@ -44,6 +64,7 @@ class CloudTrash:
         return client, key, head['ETag'], value
 
     def save(self, client, key, etag, value, plan):
+        self.synced.clear()
         value['catalogCreatedAt'] = plan['catalogCreatedAt']
         with tempfile.TemporaryDirectory(dir=self.uploads.root, prefix='trash-save-') as temp:
             path = Path(temp) / 'catalog.json'

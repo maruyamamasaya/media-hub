@@ -42,6 +42,18 @@ class ReaderTests(unittest.TestCase):
     def call(self, path='/library', method='GET', owner=OWNER, query=None, headers=None, body=None):
         return reader.handler({'rawPath': path, 'headers': headers or {}, 'body': json.dumps(body) if body else '', 'queryStringParameters': query, 'requestContext': {'http': {'method': method}, 'authorizer': {'jwt': {'claims': {'sub': owner} if owner else {}}}}}, None)
 
+    def test_pdf_catalog_and_original_url_keep_owner_and_folder_protection(self):
+        self.fake.value['items'][0].update(name='Book.pdf', mimeType='application/pdf')
+        path = f'/catalogs/{ROOT}/{UPLOAD}'
+        result = self.call(path)
+        self.assertEqual(result['statusCode'], 200)
+        self.assertEqual(json.loads(result['body'])['items'][0]['mimeType'], 'application/pdf')
+        self.assertEqual(self.call(path + f'/items/{ITEM}/url')['statusCode'], 200)
+        self.assertEqual(self.fake.signed[-1][1]['Params']['VersionId'], 'v1')
+        self.assertEqual(self.call(path + f'/items/{ITEM}/url', owner=None)['statusCode'], 401)
+        self.fake.settings['locks'] = [folder_security.make_lock(ROOT, FOLDER, '012345')]
+        self.assertEqual(self.call(path + f'/items/{ITEM}/url')['statusCode'], 404)
+
     def test_thumbnail_batch_uses_one_catalog_read_and_rejects_hidden_members(self):
         self.fake.value['items'][0]['thumbnailKey'] = f'media-hub/thumbnails/{ITEM}/{SHA}.png'
         with patch.object(self.fake, 'get_object', wraps=self.fake.get_object) as get:

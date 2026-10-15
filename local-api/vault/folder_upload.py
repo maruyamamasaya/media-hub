@@ -19,7 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'backend'))
 from .service import VaultError
 
 GIB = 1024 ** 3
-EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.heic', '.heif', '.gif', '.tif', '.tiff', '.mp4', '.mov', '.m4v', '.webm', '.mkv'}
+PDF_MAX_BYTES = 250 * 1024 ** 2
+EXTENSIONS = {'.pdf', '.jpg', '.jpeg', '.png', '.webp', '.heic', '.heif', '.gif', '.tif', '.tiff', '.mp4', '.mov', '.m4v', '.webm', '.mkv'}
 
 
 def atomic_json(path, value):
@@ -266,8 +267,9 @@ class FolderUploads:
             key = item.get('thumbnailKey') if thumbnail else item['objectKey']
             if not key:
                 raise VaultError('no_preview', 'サムネイルはまだありません。', 404)
-            if not thumbnail and item['byteSize'] > 100 * 1024 ** 2:
-                raise VaultError('too_large', '初期閲覧版は原本100MiBまでです。', 413)
+            maximum_original = PDF_MAX_BYTES if item['mimeType'] == 'application/pdf' else 100 * 1024 ** 2
+            if not thumbnail and item['byteSize'] > maximum_original:
+                raise VaultError('too_large', 'PDFは250MiB、その他の原本は100MiBまで閲覧できます。', 413)
             directory = Path(tempfile.mkdtemp(dir=self.root, prefix='viewing-'))
             target = directory / 'content'
             try:
@@ -302,7 +304,7 @@ class FolderUploads:
                     stream = snapshot.open('rb') if snapshot else self.open_source(Path(plan['sourceRoot']), source)
                 except (OSError, VaultError):
                     # Backfill can use S3 if the original input no longer exists.
-                    if item['byteSize'] > 100 * 1024 ** 2:
+                    if item['byteSize'] > (PDF_MAX_BYTES if item['mimeType'] == 'application/pdf' else 100 * 1024 ** 2):
                         return False
                     source = Path(temp) / 'source'
                     client.download(item['objectKey'], item.get('versionId'), source)
@@ -324,6 +326,11 @@ class FolderUploads:
                                     '-frames:v', '1', '-vf', 'scale=320:320:force_original_aspect_ratio=decrease',
                                     '-y', str(output)], pass_fds=(stream.fileno(),), capture_output=True, timeout=60)
                                 if result.returncode:
+                                    return False
+                                image_source = output
+                            elif item['mimeType'] == 'application/pdf':
+                                from .pdf_preview import render_pdf
+                                if not render_pdf(f'/dev/fd/{stream.fileno()}', output, pass_fds=(stream.fileno(),)):
                                     return False
                                 image_source = output
                             elif item['mimeType'].startswith('image/'):
@@ -490,6 +497,8 @@ class FolderUploads:
                     continue
                 with self.open_source(source_root, path) as stream:
                     before = os.fstat(stream.fileno())
+                    if path.suffix.lower() == '.pdf' and before.st_size > PDF_MAX_BYTES:
+                        raise VaultError('too_large', 'PDFは1ファイル250MiBまでです。', 413)
                     if before.st_size > 5 * GIB or not before.st_size:
                         raise VaultError('too_large', '初期版は1ファイル5GiB以下の空でないメディアに対応します。', 413)
                     total_bytes += before.st_size
