@@ -113,3 +113,5 @@ WebはMyShort→既存一覧APIのsort=random/seed→display File配信。安定
 S3のごみ箱は各カタログのtrash記録で管理し、共通のcatalog_trashが通常一覧・取得URLを除外する。Mac管理APIがETag条件付き保存と照合後に正確な原本／小画像キーの全版を削除し、失敗時はdeleting記録を維持する。小さな管理履歴は保持する。[操作と制限](docs/S3-TRASH.md)。
 
 費用集計はMacの手動S3全版一覧 → 集計JSON `media-hub/usage/latest.json` → 本人限定閲覧API → iPhone。保存量／保存費試算の履歴を共有し、通信記録は端末内の数値集計のみ。既存予算はアカウント全体として区別する。[計測範囲と操作](docs/USAGE-DASHBOARD.md)。
+
+通常・暗号化の送信直前に `vault/upload_duplicates.py` がS3カタログと原本SHA-256／サイズを比較し、重複送信を除外する。暗号化一覧は同梱helperでメモリ復号し、S3に平文ハッシュ索引を作らない。[判定・一覧引き継ぎ・制限](docs/UPLOAD-DUPLICATES.md)。

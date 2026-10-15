@@ -57,3 +57,26 @@ class FolderSecurityTests(unittest.TestCase):
         settings = privacy.empty_settings()
         settings['locks'] = [lock]
         self.assertIn('token', privacy.unlock(settings, 'legacy-test-password', 'owner'))
+
+    def test_99_locks_compact_grants_and_100_rejected(self):
+        import uuid
+        lock = self.settings['locks'][0]
+        self.settings['locks'] = [dict(lock, folderId=str(uuid.uuid4())) for _ in range(99)]
+        privacy.validate(self.settings)
+        with patch.object(privacy.hashlib, 'pbkdf2_hmac', wraps=privacy.hashlib.pbkdf2_hmac) as kdf:
+            token = privacy.unlock(self.settings, '012345', ROOT, now=1000)['token']
+            self.assertEqual(kdf.call_count, 1)
+        self.assertLess(len('media_hub_folder_grant=' + token + '; HttpOnly; Path=/; SameSite=strict'), 4096)
+        self.assertEqual(len(privacy.grants(self.settings, token, ROOT, now=1001)), 99)
+        self.settings['locks'].append(dict(lock, folderId=str(uuid.uuid4())))
+        with self.assertRaises(ValueError):
+            privacy.validate(self.settings)
+
+    def test_legacy_list_grant_remains_valid(self):
+        import hashlib
+        import hmac
+        payload = privacy.encode(json.dumps(dict(owner='owner', revision=self.settings['revision'],
+            expires=1300, folders=[PARENT])).encode())
+        signature = privacy.encode(hmac.new(bytes.fromhex(self.settings['signingKey']),
+            payload.encode(), hashlib.sha256).digest())
+        self.assertEqual(privacy.grants(self.settings, payload + '.' + signature, 'owner', 1001), {PARENT})

@@ -134,3 +134,21 @@ class FolderPrivacyTests(unittest.TestCase):
             self.assertEqual(len(client.get('/api/v1/folder-library').json()),1)
             client.post('/api/v1/folder-locks/relock')
             self.assertEqual(client.get('/api/v1/folder-library').json(),[])
+
+    def test_save_99th_lock_and_reject_100th_without_writing(self):
+        existing = security.make_lock(str(uuid.uuid4()), str(uuid.uuid4()), '012345')
+        self.cloud.settings['locks'] = [dict(existing, folderId=str(uuid.uuid4())) for _ in range(98)]
+        self.cloud.install_settings()
+        self.privacy.set({'planId': self.plan['id'], 'folderId': self.folder,
+                          'reuseExistingPIN': True, 'confirmSave': True}, '')
+        saved = json.loads(self.cloud.objects[security.KEY])
+        self.assertEqual(len(saved['locks']), 99)
+        saved['locks'][-1]['folderId'] = str(uuid.uuid4())
+        self.cloud.objects[security.KEY] = json.dumps(saved).encode()
+        before = self.cloud.objects[security.KEY]
+        with self.assertRaises(VaultError) as error:
+            self.privacy.set({'planId': self.plan['id'], 'folderId': self.folder,
+                              'reuseExistingPIN': True, 'confirmSave': True}, '')
+        self.assertEqual(error.exception.code, 'too_many_locks')
+        self.assertIn('99', str(error.exception))
+        self.assertEqual(self.cloud.objects[security.KEY], before)

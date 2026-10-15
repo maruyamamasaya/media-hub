@@ -29,4 +29,15 @@ final class UsageTests: XCTestCase {
         DispatchQueue.concurrentPerform(iterations: 100) { _ in store.record(scope: "other", requests: 1, now: now) }
         XCTAssertEqual(store.history(scope: "other").first?.requests, 100)
     }
+    func testPlayerAccessLogCountsOnlyNewBytesAndIgnoresUnknownValues() {
+        var delta = UsagePlayerDelta()
+        XCTAssertEqual(delta.update([-1]), 0)
+        XCTAssertEqual(delta.update([100]), 100)
+        XCTAssertEqual(delta.update([100]), 0)
+        XCTAssertEqual(delta.update([130, 20]), 50)
+        XCTAssertEqual(delta.update([120, -1]), 0)
+        XCTAssertEqual(delta.update([]), 0)
+        XCTAssertEqual(delta.update([150, 30]), 30)
+    }
+
 }

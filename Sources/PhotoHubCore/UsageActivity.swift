@@ -52,3 +52,19 @@ public final class UsageNetworkObserver: NSObject, URLSessionTaskDelegate, @unch
         UsageActivityStore.shared.record(scope: scope, requests: Int64(remote.count), receivedBytes: remote.reduce(0) { $0 + max(0, $1.countOfResponseBodyBytesReceived) })
     }
 }
+
+/// Each access-log entry reports an accumulating count; only persist new bytes.
+public struct UsagePlayerDelta {
+    private var maxima: [Int64] = []
+    public init() {}
+    public mutating func update(_ totals: [Int64]) -> Int64 {
+        var delta: Int64 = 0
+        for (index, total) in totals.enumerated() {
+            if index == maxima.count { maxima.append(0) }
+            guard total > maxima[index] else { continue }
+            delta += total - maxima[index]
+            maxima[index] = total
+        }
+        return delta
+    }
+}

@@ -80,7 +80,7 @@ class CloudTrash:
         self.uploads.save(plan)
 
     def sync(self, plan):
-        if plan['state'] == 'complete':
+        if plan['state'] == 'complete' and not plan.get('noCatalog'):
             _, _, _, value = self.load(plan)
             plan['trash'] = value.get('trash', [])
             self.uploads.save(plan)

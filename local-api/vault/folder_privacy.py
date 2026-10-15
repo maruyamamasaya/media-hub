@@ -82,6 +82,7 @@ class FolderPrivacy:
                 value['byteSize'] = sum(item['byteSize'] for item in value['items'])
                 if len(value['folders']) != len(plan['folders']):
                     value['skipped'] = 0
+                    value['duplicateCount'] = 0
                 results.append(self.uploads.public(value))
         return results
 
@@ -92,6 +93,8 @@ class FolderPrivacy:
             raise VaultError('not_found', 'フォルダが見つかりません。', 404)
         value['byteSize'] = sum(item['byteSize'] for item in value['items'])
         value['skipped'] = 0
+        if len(value['folders']) != len(self.uploads.read(plan_id)['folders']):
+            value['duplicateCount'] = 0
         return self.uploads.public(value)
 
     def plans(self, token):
@@ -104,6 +107,8 @@ class FolderPrivacy:
             if value is not None:
                 value['byteSize'] = sum(item['byteSize'] for item in value['items'])
                 value['skipped'] = 0
+                if len(value['folders']) != len(self.uploads.read(summary['id'])['folders']):
+                    value['duplicateCount'] = 0
                 results.append(self.uploads.public(value))
         return results
 
@@ -163,7 +168,7 @@ class FolderPrivacy:
                 except ValueError:
                     raise VaultError('invalid_password', '半角数字6桁のPINを設定してください。')
             if len(locks) > security.MAX_LOCKS:
-                raise VaultError('too_many_locks', '初期版の鍵は10フォルダまでです。', 409)
+                raise VaultError('too_many_locks', f'鍵は{security.MAX_LOCKS}フォルダまでです。', 409)
             settings.update(locks=locks, revision=str(uuid.uuid4()))
             client.verify_private()
             with tempfile.TemporaryDirectory(dir=self.uploads.root, prefix='locks-save-') as temp:

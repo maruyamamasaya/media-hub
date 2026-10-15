@@ -111,7 +111,7 @@ public struct UsageDashboard: View {
                             .accessibilityLabel(point.date).accessibilityValue("\(bytes(point.receivedBytes))、\(point.requests)回")
                     }.frame(height: 150).chartYAxisLabel("MiB")
                 } else { Text("記録はこの機能の導入後から始まります。").foregroundStyle(.secondary) }
-                Text(device == "このMac" ? "このMacのS3 CLI呼出回数と取得完了した原本・小画像の容量、暗号化の直接受信を記録します。CLI内部の再試行・途中失敗の受信量は含みません。軽量版のローカル再生も再生開始に含みます。" : "このiPhoneの写真・管理情報・暗号化の受信を記録します。通常動画のOSによる転送・認証通信は含みません。キャッシュ表示は通信に数えません。")
+                Text(device == "このMac" ? "このMacのS3 CLI呼出回数と取得完了した原本・小画像の容量、暗号化の直接受信を記録します。CLI内部の再試行・途中失敗の受信量は含みません。軽量版のローカル再生も再生開始に含みます。" : "このiPhoneの写真・管理情報・暗号化の受信を記録します。通常動画はプレーヤーが報告した受信量のみ追加し、動画の通信回数・未報告分・認証通信は含みません。キャッシュ表示は通信に数えません。")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("端末ごとの導入後の記録で、他端末とは合算しません。AWSの請求転送量とは異なります。")
                     .font(.caption).foregroundStyle(.secondary)

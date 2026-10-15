@@ -24,6 +24,13 @@ class FakeCloud:
         self.corrupt = False
         self.after_put = None
 
+    def call(self, operation, *args):
+        if operation != 'list-objects-v2':
+            raise AssertionError(operation)
+        prefix = args[args.index('--prefix') + 1]
+        return {'Contents': [{'Key': k, 'Size': len(v), 'LastModified': '2026-10-15T00:00:00Z'}
+                             for k, v in self.objects.items() if k.startswith(prefix)]}
+
     def download(self, key, version, target):
         target.write_bytes(self.objects[key])
 

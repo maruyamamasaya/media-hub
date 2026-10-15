@@ -102,3 +102,7 @@ S3ごみ箱は `local-api/tests/test_cloud_trash.py` と `backend/tests/test_rea
 
 
 読み込み速度はiOS IntegrationTestsで30素材の署名URL同時要求が1通信にまとまること、署名結果再利用、同一画像12要求が1ダウンロードになること、メモリ／ディスク再利用で追加通信しないこと、再ロック拒否、キャンセル30件後の待ち行列消滅を検証する。backend ReaderTestsは最大60件を1カタログ読取で署名し、所属外・未解除・重複・上限超過を一括拒否する。実機の体感速度と請求額はこの隔離テストの対象外。
+
+内容重複の除外は `local-api/tests/test_upload_duplicates.py` で確認する。検証対象・境界は[送信時の内容重複チェック](docs/UPLOAD-DUPLICATES.md)。実暗号化helperを事前にMacビルドで更新する。
+
+費用対策は重複テストでカタログの版/ETag/保存先分離・暗号文のみの再利用・64MiB境界・件数超過・原本欠損時の再照合を確認する。iOS統合テストは先読み1枚/窓/累計予算と動画除外、Swift UsageTestsは動画アクセスログの累積増分と二重加算拒否を確認する。実動画のログ報告範囲とAWS請求との照合は別途必要。

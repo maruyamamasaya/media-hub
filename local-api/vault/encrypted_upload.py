@@ -107,6 +107,14 @@ class EncryptedUploads:
             raise VaultError('integrity', '暗号化結果の照合に失敗しました。', 409)
         return metadata
 
+    def decrypt_catalog(self, path, object_id, key_id, key):
+        payload = json.dumps({'source': str(path), 'operation': 'catalog', 'objectID': object_id,
+                              'keyID': key_id, 'masterKey': base64.b64encode(key).decode()})
+        result = subprocess.run([str(self.helper)], input=payload, capture_output=True, text=True, timeout=60)
+        if result.returncode:
+            raise VaultError('integrity', '保存済みの暗号化一覧を復号できません。重複確認のため送信を停止しました。', 409)
+        return json.loads(result.stdout)
+
     def put(self, client, source, object_id, key_id, plan, item, key):
         plan_id = plan['id']
         object_key = f'media-hub/encrypted-objects/{key_id}/{plan_id}/{object_id}.bin'
@@ -188,6 +196,12 @@ class EncryptedUploads:
         plan = self.uploads.read(plan_id)
         try:
             client = self.uploads.client_factory(plan['bucket'], plan['profile'], plan['region']); client.verify_private()
+            from .upload_duplicates import prepare
+            prepare(self.uploads, plan, client,
+                lambda path, identity: self.decrypt_catalog(path, identity, key_id, key), key_id)
+            if plan.get('noCatalog'):
+                plan['state'] = 'complete'
+                return
             def work(item):
                 if item['state'] == 'verified':
                     return
@@ -240,7 +254,7 @@ class EncryptedUploads:
         results = []
         for public in self.list():
             raw = self.uploads.read(public['id'])
-            if raw['state'] == 'complete':
+            if raw['state'] == 'complete' and not raw.get('noCatalog'):
                 client = self.uploads.client_factory(raw['bucket'], raw['profile'], raw['region'])
                 remote = client.head(f'media-hub/encrypted-catalogs/{raw["keyID"]}/{raw["id"]}.bin')
                 if remote:

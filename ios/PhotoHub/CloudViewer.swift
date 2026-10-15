@@ -23,6 +23,7 @@ final class CloudViewerModel: ObservableObject {
     func usageReport() async throws -> UsageReport { try await get("/usage", as: UsageReport.self) }
     func recordVideoStart() { UsageActivityStore.shared.record(scope: usageScope, videoStarts: 1) }
     private let sealedRequests = SealedRequestGate()
+    private var swipePrefetchBudget = ReaderPrefetchBudget()
     // Only ordinary reader images enter this cache; sealed media uses a separate reader.
     private let images = NSCache<NSString, UIImage>()
     private var imageCacheGeneration = UUID()
@@ -93,6 +94,7 @@ final class CloudViewerModel: ObservableObject {
     private var folderToken: String?
     private var folderTimer: Timer?
     func relock() {
+        swipePrefetchBudget = ReaderPrefetchBudget()
         images.removeAllObjects()
         for (_, task) in imageLoads.values { task.cancel() }
         imageLoads = [:]
@@ -340,6 +342,7 @@ final class CloudViewerModel: ObservableObject {
         let identity = sessionID
         for entry in ReaderSwipeScreen.upcomingPhotos(entries, after: index) {
             guard !Task.isCancelled, identity == sessionID else { return }
+            guard swipePrefetchBudget.reserve(imageCacheID(entry.catalog, entry.item), bytes: entry.item.byteSize) else { continue }
             do {
                 // Keep this work in the view's task so paging/dismissal cancels its download.
                 // Sequential requests leave bandwidth available for the displayed media.
@@ -890,6 +893,7 @@ struct ReaderLoadingView: View {
 }
 
 struct ReaderVideoPlayer: View {
+    @EnvironmentObject private var model: CloudViewerModel
     let player: AVPlayer
     var body: some View {
         VideoPlayer(player: player).overlay {
@@ -905,6 +909,22 @@ struct ReaderVideoPlayer: View {
                     ReaderLoadingView(status: "動画の続きを受信待ち…")
                 }
             }.allowsHitTesting(false)
+        }.task(id: ObjectIdentifier(player)) {
+            // Sealed media is measured by its URLSession; do not count decrypted bytes twice.
+            guard let item = player.currentItem,
+                  let asset = item.asset as? AVURLAsset, asset.url.scheme == "https" else { return }
+            let scope = model.usageScope
+            var counter = UsagePlayerDelta()
+            func collect() {
+                let bytes = counter.update(item.accessLog()?.events.map { $0.numberOfBytesTransferred } ?? [])
+                if bytes > 0 { UsageActivityStore.shared.record(scope: scope, receivedBytes: bytes) }
+            }
+            defer { collect() }
+            while !Task.isCancelled {
+                collect()
+                do { try await Task.sleep(nanoseconds: 5_000_000_000) }
+                catch { break }
+            }
         }
     }
 }
@@ -1089,10 +1109,30 @@ struct ReaderOverview: View {
     }
 }
 
+struct ReaderPrefetchBudget {
+    private(set) var remainingBytes: Int64 = 100 * 1024 * 1024
+    private var attempted = Set<String>()
+    mutating func reserve(_ id: String, bytes: Int64) -> Bool {
+        guard bytes > 0, bytes <= remainingBytes, !attempted.contains(id) else { return false }
+        remainingBytes -= bytes
+        attempted.insert(id)
+        return true
+    }
+}
+
 struct ReaderSwipeScreen: View {
     static func upcomingPhotos(_ entries: [ReaderEntry], after index: Int) -> [ReaderEntry] {
         guard entries.indices.contains(index) else { return [] }
-        return Array(entries.dropFirst(index + 1).lazy.filter { $0.item.mimeType.hasPrefix("image/") }.prefix(10))
+        var remaining: Int64 = 20 * 1024 * 1024
+        var result: [ReaderEntry] = []
+        for entry in entries.dropFirst(index + 1).lazy.filter({ $0.item.mimeType.hasPrefix("image/") }).prefix(10) {
+            let bytes = entry.item.byteSize
+            guard bytes > 0,
+                  bytes <= 10 * 1024 * 1024, bytes <= remaining else { continue }
+            result.append(entry); remaining -= bytes
+            if result.count == 10 { break }
+        }
+        return result
     }
     @EnvironmentObject private var model: CloudViewerModel
     @Environment(\.dismiss) private var dismiss
@@ -1160,6 +1200,7 @@ struct ReaderSwipeScreen: View {
                 let url = try await model.mediaURL(current.catalog, current.item)
                 guard !Task.isCancelled, identity == model.sessionID, current.id == entry.id else { return }
                 player = AVPlayer(url: url)
+                model.recordVideoStart()
             } else {
                 let value = try await model.image(current.catalog, current.item) { status in
                     guard identity == model.sessionID, current.id == entry.id else { return }

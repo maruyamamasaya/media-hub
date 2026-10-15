@@ -176,6 +176,7 @@ export interface FolderUpload {
   folders: MediaFolder[];
   items: FolderUploadItem[];
   progress?: UploadProgress;
+  duplicateCount?: number;
 }
 
 export interface ReadRoot {

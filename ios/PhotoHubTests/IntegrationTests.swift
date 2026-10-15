@@ -103,6 +103,29 @@ final class IntegrationTests: XCTestCase {
         await model.prefetchSwipeImages(entries, after: 22)
         XCTAssertEqual(ReaderBatchProtocol.imageCount, 11, "Relocking prevents further downloads")
     }
+    func testSwipePrefetchByteLimitsAndSessionBudget() throws {
+        let mib: Int64 = 1024 * 1024
+        let sizes: [Int64] = [1, 11 * mib, 10 * mib, 10 * mib, 1, -1, 0]
+        let catalog = try JSONDecoder().decode(ReadCatalog.self, from: JSONSerialization.data(withJSONObject: [
+            "id": "catalog", "rootId": "root", "name": "Test", "folders": [],
+            "items": sizes.enumerated().map { index, size in
+                ["id": "item-\(index)", "name": "Photo", "folderId": "folder", "sha256": String(repeating: "a", count: 64),
+                 "mimeType": "image/png", "byteSize": size, "hasThumbnail": true] as [String: Any]
+            }
+        ]))
+        let entries = catalog.items.map { ReaderEntry(catalog: catalog, item: $0) }
+        XCTAssertEqual(ReaderSwipeScreen.upcomingPhotos(entries, after: 0).map { $0.item.id }, ["item-2", "item-3"])
+        var budget = ReaderPrefetchBudget()
+        XCTAssertFalse(budget.reserve("invalid", bytes: -1))
+        for index in 0..<10 { XCTAssertTrue(budget.reserve("id-\(index)", bytes: 10 * mib)) }
+        XCTAssertEqual(budget.remainingBytes, 0)
+        XCTAssertFalse(budget.reserve("one-more", bytes: 1))
+        XCTAssertFalse(budget.reserve("id-0", bytes: 1))
+        var repeated = ReaderPrefetchBudget()
+        XCTAssertTrue(repeated.reserve("same", bytes: 1))
+        XCTAssertFalse(repeated.reserve("same", bytes: 1))
+        XCTAssertEqual(repeated.remainingBytes, 100 * mib - 1)
+    }
     func testOverviewSeparatesMediaAndKeepsIdentityAcrossFolders() throws {
         func catalog(_ id: String) throws -> ReadCatalog {
             try JSONDecoder().decode(ReadCatalog.self, from: JSONSerialization.data(withJSONObject: [

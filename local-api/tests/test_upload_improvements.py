@@ -113,7 +113,7 @@ class UploadSchedulingTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name); self.source = self.root / 'Photos'; self.source.mkdir()
-        for n in range(4): (self.source / f'{n}.png').write_bytes(b'image')
+        for n in range(4): (self.source / f'{n}.png').write_bytes(f'image{n}'.encode())
         self.cloud = FakeCloud(); self.service = FolderUploads(self.root / 'data', lambda *args: self.cloud)
     def scan(self):
         return self.service.scan({'path': str(self.source), 'bucket':'test-bucket', 'profile':'test', 'region':'ap-northeast-1'})
@@ -164,7 +164,7 @@ class UploadSchedulingTests(unittest.TestCase):
             status = client.get(endpoint + '/' + job['id'], headers=headers).json()
             if status['state'] != 'scanning': break
             time.sleep(.01)
-        self.assertEqual(status['state'], 'complete'); self.assertEqual(status['bytes'], 20)
+        self.assertEqual(status['state'], 'complete'); self.assertEqual(status['bytes'], 24)
         self.assertEqual(client.post('/api/v1/folder-uploads/queue', json={'planIds':[status['planId']], 'confirmUpload':False}, headers=headers).status_code,400)
 
 
@@ -177,6 +177,8 @@ class EndToEndMultipartCloud(FakeCloud, MultipartUpload):
         if value and key in self.composites: value['ChecksumSHA256'] = self.composites[key]
         return value
     def call(self, operation, *args):
+        if operation == 'list-objects-v2':
+            return FakeCloud.call(self, operation, *args)
         def arg(key): return args[args.index(key) + 1]
         key = arg('--key')
         if operation == 'create-multipart-upload':

@@ -9,7 +9,7 @@ import uuid
 
 KEY = 'media-hub/folder-locks/settings.json'
 ITERATIONS = 600000
-MAX_LOCKS = 10
+MAX_LOCKS = 99
 TTL = 300
 
 
@@ -96,6 +96,11 @@ def grants(settings, token, owner, now=None):
             return set()
         allowed = {lock['folderId'] for lock in settings['locks']}
         ids = value['folders']
+        if isinstance(ids, str):
+            packed = decode(ids)
+            if len(packed) % 16 or len(packed) > MAX_LOCKS * 16:
+                return set()
+            ids = [str(uuid.UUID(bytes=packed[i:i + 16])) for i in range(0, len(packed), 16)]
         if not isinstance(ids, list) or any(folder not in allowed for folder in ids):
             return set()
         return set(ids)
@@ -108,15 +113,19 @@ def unlock(settings, password, owner, previous='', now=None):
     raw = password_bytes(password)
     matched = set()
     # Check every configured verifier; do not expose names or which entry failed.
+    checked = {}
     for lock in settings['locks']:
-        digest = hashlib.pbkdf2_hmac('sha256', raw, bytes.fromhex(lock['salt']), ITERATIONS).hex()
+        credential = (lock['salt'], lock['verifier'])
+        if credential not in checked:
+            checked[credential] = hashlib.pbkdf2_hmac('sha256', raw, bytes.fromhex(lock['salt']), ITERATIONS).hex()
+        digest = checked[credential]
         if hmac.compare_digest(digest, lock['verifier']):
             matched.add(lock['folderId'])
     if not matched:
         raise ValueError('Cannot unlock')
     matched |= grants(settings, previous, owner, now)
     payload = encode(json.dumps(dict(owner=owner, revision=settings['revision'], expires=int(now) + TTL,
-                                    folders=sorted(matched)), separators=(',', ':')).encode())
+                                    folders=encode(b''.join(uuid.UUID(folder).bytes for folder in sorted(matched)))), separators=(',', ':')).encode())
     signature = encode(hmac.new(bytes.fromhex(settings['signingKey']), payload.encode(), hashlib.sha256).digest())
     return dict(token=payload + '.' + signature, expiresIn=TTL)
 

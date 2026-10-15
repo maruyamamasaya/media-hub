@@ -185,13 +185,15 @@ class FolderUploads:
             self.root.chmod(0o700)
         self.lock = threading.RLock()
         self.client_factory = client_factory
+        from .upload_duplicates import CatalogCache
+        self.duplicate_catalog_cache = CatalogCache()
         self.running = set()
         self.live = {}
         self.scan_jobs = {}
         self.scan_running = False
         self.queue = []
         # A prior crash may have interrupted response cleanup; no viewing files are durable.
-        for prefix in ('staging-', 'viewing-', 'preview-build-', 'catalog-update-', 'sealed-staging-'):
+        for prefix in ('staging-', 'viewing-', 'preview-build-', 'catalog-update-', 'sealed-staging-', 'duplicate-read-'):
             for directory in self.root.glob(prefix + '*'):
                 if directory.is_dir() and not directory.is_symlink():
                     shutil.rmtree(directory)
@@ -224,6 +226,7 @@ class FolderUploads:
             'folders': [{k: folder[k] for k in ('id', 'name', 'parentId')} | {'isLocked': bool(folder.get('isLocked'))} for folder in plan['folders']],
             'items': [{k: item[k] for k in ('id', 'name', 'folderId', 'relativePath', 'byteSize', 'state')} for item in plan['items']],
             'completed': sum(i['state'] == 'verified' for i in plan['items']), 'skipped': plan['skipped'],
+            'duplicateCount': plan.get('duplicateCount', 0),
         } | ({'progress': dict(self.live[plan['id']])} if plan['id'] in self.live and
              plan['byteSize'] == self.live[plan['id']]['totalBytes'] else {})
 
@@ -247,7 +250,7 @@ class FolderUploads:
         saved, seen = [], set()
         for plan in sorted(self.list(), key=lambda p: self.read(p['id']).get('catalogCreatedAt', self.path(p['id']).stat().st_mtime), reverse=True):
             root = next(f['id'] for f in plan['folders'] if f['parentId'] is None)
-            if plan['state'] == 'complete' and root not in seen:
+            if plan['state'] == 'complete' and not self.read(plan['id']).get('noCatalog') and root not in seen:
                 seen.add(root)
                 raw = self.read(plan['id'])
                 import catalog_trash
@@ -792,6 +795,11 @@ class FolderUploads:
         try:
             client = self.client_factory(plan['bucket'], plan['profile'], plan['region'])
             client.verify_private()
+            from .upload_duplicates import prepare
+            prepare(self, plan, client)
+            if plan.get('noCatalog'):
+                plan['state'] = 'complete'
+                return
             def work(item):
                 expected = base64.b64encode(bytes.fromhex(item['sha256'])).decode()
                 remote = client.head(item['objectKey'])
@@ -833,7 +841,8 @@ class FolderUploads:
             else:
                 self.live[plan_id] = {'phase': 'catalog', 'name': '', 'bytes': plan['byteSize'], 'totalBytes': plan['byteSize'], 'remainingSeconds': None, 'activeFiles': 0}
                 # Immutable folder snapshot: filenames and parent IDs are metadata only.
-                manifest = {'schemaVersion': 1, 'id': plan['id'], 'rootId': plan['rootId'], 'name': plan['name'],
+                plan.setdefault('catalogCreatedAt', time.time())
+                manifest = {'schemaVersion': 1, 'id': plan['id'], 'rootId': plan['rootId'], 'name': plan['name'], 'catalogCreatedAt': plan['catalogCreatedAt'],
                             'folders': plan['folders'], 'items': [{k: i.get(k) for k in
                                 ('id', 'name', 'folderId', 'byteSize', 'sha256', 'objectKey', 'mimeType', 'versionId', 'thumbnailKey')} for i in plan['items']]}
                 manifest_path = self.path(plan_id).parent / 'catalog.json'

@@ -271,6 +271,7 @@ struct UploadPlanView: View {
                 }.font(.caption).foregroundStyle(.secondary)
             }
             if plan.skipped > 0 { Text("対象外の\(plan.skipped)件は送信しません。").font(.callout).foregroundStyle(.secondary) }
+            if let count = plan.duplicateCount, count > 0 { Text("内容が同じ\(count)件は送信しません。").font(.callout).foregroundStyle(.secondary) }
             if !plan.error.isEmpty { Label(plan.error, systemImage: "exclamationmark.circle").font(.callout).foregroundStyle(.red) }
             if plan.state != "planned" {
                 VStack(alignment: .leading, spacing: 8) {
@@ -294,7 +295,7 @@ struct UploadPlanView: View {
                 Text("Macの原本はそのまま残っています。").font(.caption).foregroundStyle(.secondary)
             } else {
                 if encrypted {
-                    Text("新しく確認して送り直すと、同じ素材も別データとして保存され、容量が増えます。途中から続ける場合は履歴の再開を使ってください。")
+                    Text("同じ鍵で保存済みの素材と内容を比較し、重複は送信しません。途中から続ける場合は履歴の再開を使ってください。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 HStack {
@@ -586,5 +587,5 @@ struct CloudTrashScreen: View {
 }
 
 private func uploadPhase(_ phase: String) -> String {
-    ["preparing": "原本を準備・照合中", "encrypting": "暗号化中", "uploading": "送信中", "thumbnail": "小画像を作成・照合中", "catalog": "フォルダ情報を保存中"][phase] ?? "処理中"
+    ["duplicates": "保存済み素材と重複を確認中", "preparing": "原本を準備・照合中", "encrypting": "暗号化中", "uploading": "送信中", "thumbnail": "小画像を作成・照合中", "catalog": "フォルダ情報を保存中"][phase] ?? "処理中"
 }

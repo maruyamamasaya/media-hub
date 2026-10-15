@@ -689,6 +689,9 @@
         },
         "progress": {
           "$ref": "#/$defs/UploadProgress"
+        },
+        "duplicateCount": {
+          "type": "integer"
         }
       }
     },

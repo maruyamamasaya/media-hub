@@ -16,13 +16,13 @@ iPhoneは本人認証付き `GET /usage` でその集計を読む。Lambdaには
 
 機能導入後の通信回数と記録済み受信量を、今月の日別グラフで表示する。記録は日本時間・最大90日分。MacとiPhoneは別集計で、通信履歴をS3へ送ったり端末間合算したりしない。
 
-- iPhone: 閲覧API・通常画像・暗号化Range取得のURLSessionタスク指標からネットワーク取引回数と受信本文bytesを記録する。キャッシュ表示は含まず、記録できる再試行・エラー応答も含む。通常動画のAVPlayerによる通信・認証用の通信は対象外。
+- iPhone: 閲覧API・通常画像・暗号化Range取得のURLSessionタスク指標からネットワーク取引回数と受信本文bytesを記録する。キャッシュ表示は含まず、記録できる再試行・エラー応答も含む。通常動画はAVPlayerが報告した受信bytesの増分を5秒ごとと表示終了時に追加する。通常動画の通信回数・未報告の受信・認証用通信は対象外。暗号化動画の受信はURLSessionのみで計測し二重加算しない。
 - Mac: S3CLIの呼出回数とGETが完了したオブジェクトのContentLength、暗号化直接取得のURLSession指標を合算する。CLI内部の再試行・途中失敗の受信・管理APIの本文サイズは対象外。
 - 通常／暗号化動画のプレーヤー生成は「再生開始」として別に記録する。実際に視聴した秒数・完走回数ではない。Macの軽量版のローカル再生もここに含む。
 
 端末の接続先／本人（Macは保存先／プロファイル／リージョン）をハッシュ化して集計を分ける。URL・ファイル名・ID・認証情報は記録せず、日付と数値のみを永続化する。iPhoneはUserDefaults、MacのCLI分はprivate作業領域 `usage/`。ログアウト後は閲覧画面を破棄するが集計自体は保持し、同じ本人の再ログイン後に継続する。写真キャッシュの削除は集計を削除しない。
 
-通信回数だけから料金を換算しない。この受信量はAWSの請求転送量ではなく、通常動画・他端末・先読み／シーク等の未計測がある。S3追加リクエストメトリクスは有効化していない。[AWSのメトリクス仕様](https://docs.aws.amazon.com/AmazonS3/latest/userguide/cloudwatch-monitoring.html)。
+通信回数だけから料金を換算しない。この受信量はAWSの請求転送量ではなく、通常動画の未報告分・他端末・CLI内部再試行等の未計測がある。S3追加リクエストメトリクスは有効化していない。[AWSのメトリクス仕様](https://docs.aws.amazon.com/AmazonS3/latest/userguide/cloudwatch-monitoring.html)。
 
 ## 既存予算
 
@@ -31,3 +31,5 @@ Macの更新時に既存 `Monthly-10USD-Alert` の反映済み費用・予測・
 ## 検証
 
 `local-api/tests/test_usage.py`、`backend/tests/test_usage.py`、`Tests/PhotoHubCoreTests/UsageTests.swift` で集計・ページング・旧版・履歴更新・接続先分離・欠損／競合／取得失敗・契約・本人認証・固定キー・サイズ上限・日付／同時記録を確認する。実AWSと実機反映の結果は [作業記録](../sessions/2026-10-14-usage-dashboard.md)。
+
+動画の計測は[Appleのアクセスログ仕様](https://developer.apple.com/documentation/avfoundation/avplayeritemaccesslogevent)に基づく。実S3動画での報告範囲と請求転送量の比較は未確認。
