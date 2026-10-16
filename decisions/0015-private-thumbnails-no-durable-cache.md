@@ -1,6 +1,6 @@
 # 0015: 非公開S3サムネイルと端末の長期キャッシュ廃止
 Date: 2026-10-14
-Status: accepted
+Status: superseded（Mac通常小画像の保持方針のみ。[0025](0025-mac-cache-and-shared-favorites.md)へ更新）
 ## Context
 本人は端末へサムネイルを残したくないと指定し、1万枚を月2〜3回表示する条件で非公開S3方式を選択した。
 ## Decision

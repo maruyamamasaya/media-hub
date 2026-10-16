@@ -10,6 +10,7 @@ import folder_security as privacy
 import encrypted_reader
 import catalog_trash
 import usage_report
+import favorites
 
 from catalog_limits import MAX_CATALOG_BYTES, CATALOG_CHUNK_BYTES, MAX_CATALOG_RESPONSE_BYTES
 
@@ -84,7 +85,7 @@ def handler(event, context):
         return response(403, {'error': 'Owner only'})
     method = event.get('requestContext', {}).get('http', {}).get('method')
     path = unquote(event.get('rawPath', ''))
-    if method != 'GET' and not (method == 'POST' and path == '/folder-unlock'):
+    if method != 'GET' and not (method == 'POST' and path in ('/folder-unlock', '/favorites')):
         return response(405, {'error': 'Read only'})
     try:
         s3 = client()
@@ -102,6 +103,18 @@ def handler(event, context):
         headers = {key.lower(): value for key, value in event.get('headers', {}).items()}
         grant = headers.get('x-folder-unlock', '')
         allowed = privacy.grants(settings, grant, owner)
+        if path == '/favorites':
+            cache = {}
+            authorize = lambda ref: favorites.visible(s3, bucket, ref, settings, allowed, catalog, cache)
+            if method == 'GET':
+                return reply(200, favorites.listing(s3, bucket, authorize))
+            raw = event.get('body', '')
+            if event.get('isBase64Encoded'):
+                raw = base64.b64decode(raw).decode()
+            if len(raw) > 2048:
+                return reply(400, {'error': 'Invalid favorite request'})
+            status, value = favorites.update(s3, bucket, json.loads(raw), authorize)
+            return reply(status, value)
         if path == '/folder-unlock':
             if method != 'POST':
                 return reply(405, {'error': 'POST required'})

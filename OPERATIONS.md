@@ -76,3 +76,12 @@ S3の削除・復元はMacの「S3フォルダ → ごみ箱」。完全削除�
 容量と費用はMac左メニュー「容量と費用」→「AWSから更新」。保存量と既存予算の集計を非公開S3へ保存し、iPhoneの「設定 → 容量と費用」で読む。通信回数・計測済み受信量は導入後から端末別に記録する。[操作・試算条件・未計測](docs/USAGE-DASHBOARD.md)。
 
 重複確認の通信上限で追加送信が停止した場合は、新規履歴の作り直しや原本削除で回避せず、[検査の通信量制限](docs/UPLOAD-DUPLICATES.md)を確認する。先読み容量制限と通常動画の計測範囲は[閲覧仕様](docs/S3-READER.md)、残る費用リスクは[費用対策](docs/COST-RISKS-2026-10-15.md)を参照。
+
+## 共有お気に入りの配備
+`infrastructure/reader.yaml` のGET／POST `/favorites`、Lambdaの `favorites.py` と `reader.py`、お気に入り専用キーのGetObject／PutObject権限を合わせて反映する。既存コード・JWT本人認証・素材の読取専用権限は保持する。
+
+初回は `{"schemaVersion":1,"entries":{}}` のUTF-8 JSONを用意し、AWS CLIの `s3api put-object` で `media-hub/favorites/state.json` に `--if-none-match '*' --content-type application/json --server-side-encryption AES256` を指定して一度だけ作成する。対象バケット／プロファイル／リージョンを既存設定と一致させる。412は既存ファイルを保持して続行し、無条件上書きしない。Lambdaにバケット全体のList権限を与えていないため、保存先未作成時はAccessDeniedとなる場合がある。これを空の情報と解釈して上書きしない。
+
+更新後はCodeSha256・未認証401・別本人403、合成カタログでお気に入り追加／読取／解除を確認し、作成した合成カタログの正確なVersionIdだけを除去する。本人の素材・既存お気に入りの全消去は行わない。2026-10-16に変更セットを確認して既存リソースの置換なしで更新し、初期保存先を条件付き作成、実際のMac／iPhone経路の往復を確認済み。
+
+通常アップロードのHTTP接続プールには `local-api/requirements.txt` の `boto3[crt]` が必要。既存のAWSログイン方式を使うためCRTを含めて導入する。Pythonコード変更の反映はMacアプリ再起動後で、送信中・予約中に再起動しない。SDKで認証期限切れが起きた場合は従来のAWS再ログイン導線を利用する。

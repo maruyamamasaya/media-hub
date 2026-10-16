@@ -412,8 +412,9 @@ public struct FolderUpload: Codable, Sendable {
     public let progress: UploadProgress?
     public let duplicateCount: Int64?
     public let completedAt: Double?
+    public let rootId: String?
     private enum CodingKeys: String, CodingKey {
-        case id, name, bucket, profile, region, state, error, byteSize, completed, skipped, folders, items, progress, duplicateCount, completedAt
+        case id, name, bucket, profile, region, state, error, byteSize, completed, skipped, folders, items, progress, duplicateCount, completedAt, rootId
     }
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -432,6 +433,7 @@ public struct FolderUpload: Codable, Sendable {
         try container.encodeIfPresent(progress, forKey: .progress)
         try container.encodeIfPresent(duplicateCount, forKey: .duplicateCount)
         try container.encodeIfPresent(completedAt, forKey: .completedAt)
+        try container.encodeIfPresent(rootId, forKey: .rootId)
     }
 }
 
@@ -749,6 +751,28 @@ public struct UsageReport: Codable, Sendable {
         try container.encode(history, forKey: .history)
         try container.encodeIfPresent(budget, forKey: .budget)
         try container.encode(notes, forKey: .notes)
+    }
+}
+
+public struct FavoriteReference: Codable, Sendable {
+    public let space: String
+    public let rootId: String
+    public let catalogId: String
+    public let targetId: String
+    public let kind: String
+    public init(space: String, rootId: String, catalogId: String, targetId: String, kind: String) {
+        self.space = space; self.rootId = rootId; self.catalogId = catalogId; self.targetId = targetId; self.kind = kind
+    }
+    private enum CodingKeys: String, CodingKey {
+        case space, rootId, catalogId, targetId, kind
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(space, forKey: .space)
+        try container.encode(rootId, forKey: .rootId)
+        try container.encode(catalogId, forKey: .catalogId)
+        try container.encode(targetId, forKey: .targetId)
+        try container.encode(kind, forKey: .kind)
     }
 }
 

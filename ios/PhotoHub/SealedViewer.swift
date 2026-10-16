@@ -2,6 +2,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 import CryptoKit
 import AVKit
+import ImageIO
+import Network
 import PhotoHubCore
 import AssetLibraryContract
 
@@ -61,7 +63,42 @@ func phoneSealedReader(_ model: CloudViewerModel, root: SealedRoot, secret: Medi
     }
     return SealedRangeReader(objectID: objectID ?? root.id, master: secret.masterKey, expectedLength: length, maximumLength: maximum) { range in try await http.bytes(range) }
 }
+// HiddenPagePINSheet verifies the stored PIN before invoking its open callback.
+// Setup is disabled here: this second step must use the existing device PIN.
+struct PhoneSealedEntry: View {
+    let favoritesOnly: Bool
+    let onOpen: () -> Void
+    @EnvironmentObject private var model: CloudViewerModel
+    @State private var showingPIN = false
+    @State private var verified = false
+    private var title: String { favoritesOnly ? "暗号化したお気に入り" : "暗号化したファイルを見る" }
+
+    var body: some View {
+        Button {
+            verified = false
+            showingPIN = true
+        } label: {
+            HStack {
+                Label(title, systemImage: favoritesOnly ? "heart" : "lock.shield")
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+            }
+        }
+        .sheet(isPresented: $showingPIN, onDismiss: {
+            if verified && model.signedIn && model.hiddenPagesOpen { onOpen() }
+            verified = false
+        }) {
+            let identity = model.sessionID
+            HiddenPagePINSheet(title: title, allowsSetup: false) { _ in
+                guard identity == model.sessionID, model.signedIn, model.hiddenPagesOpen else { return }
+                verified = true
+            }
+        }
+    }
+}
+
 struct PhoneSealedLibrary: View {
+    var favoritesOnly = false
     @EnvironmentObject private var model: CloudViewerModel
     @State private var secret: MediaSecret?
     @State private var roots: [SealedRoot] = []
@@ -73,7 +110,7 @@ struct PhoneSealedLibrary: View {
                 else {
                     if let secret {
                         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 14) {
-                            ForEach(roots.filter { $0.keyID == secret.keyID }) { root in PhoneSealedRootRow(root: root, secret: secret) }
+                            ForEach(roots.filter { root in root.keyID == secret.keyID && (!favoritesOnly || model.favorites.contains { $0.space == "sealed" && $0.rootId == root.keyID && $0.catalogId == root.id }) }) { root in PhoneSealedRootRow(root: root, secret: secret, favoritesOnly: favoritesOnly) }
                         }
                         if roots.filter({ $0.keyID == secret.keyID }).isEmpty { ContentUnavailableView("フォルダはまだありません", systemImage: "folder") }
                         DisclosureGroup("暗号化の鍵") { PhoneSealedKeyImport() }
@@ -81,31 +118,39 @@ struct PhoneSealedLibrary: View {
                 }
                 if !error.isEmpty { Text(error).foregroundStyle(.red) }
             }.padding(16)
-        }.navigationTitle("暗号化フォルダ").navigationBarTitleDisplayMode(.inline).task { await load() }
+        }.navigationTitle(favoritesOnly ? "暗号化したお気に入り" : "暗号化したファイル").navigationBarTitleDisplayMode(.inline).task { await load() }
             .refreshable { await load() }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in Task { await load() } }
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("MediaHubEncryptionKeyChanged"))) { _ in Task { await load() } }
             .toolbar { Button("更新", systemImage: "arrow.clockwise") { Task { await load() } } }
     }
     private func load() async {
+        guard model.signedIn, model.hiddenPagesOpen else { secret = nil; roots = []; return }
+        let identity = model.sessionID
         do {
-            secret = try MediaSecretStore.load()
-            if model.signedIn, secret != nil { roots = try await model.encryptedRoots() }
+            let loadedSecret = try MediaSecretStore.load()
+            let loadedRoots = loadedSecret == nil ? [] : try await model.encryptedRoots()
+            guard identity == model.sessionID, model.signedIn, model.hiddenPagesOpen, !Task.isCancelled else { return }
+            secret = loadedSecret; roots = loadedRoots
             error = ""
-        } catch { self.error = error.localizedDescription }
+        } catch { if identity == model.sessionID { self.error = error.localizedDescription } }
     }
 }
 struct PhoneSealedRootRow: View {
     @EnvironmentObject private var model: CloudViewerModel
     let root: SealedRoot; let secret: MediaSecret
+    var favoritesOnly = false
     @State private var catalog: SealedCatalog?
     @State private var error = ""
     var body: some View {
         Group {
             if let catalog {
-                NavigationLink { PhoneSealedFolder(root: root, catalog: catalog, secret: secret, folderID: catalog.folders.first { $0.parentId == nil }?.id) } label: {
+                NavigationLink { PhoneSealedFolder(root: root, catalog: catalog, secret: secret, folderID: catalog.folders.first { $0.parentId == nil }?.id, favoritesOnly: favoritesOnly) } label: {
                     PhoneSealedFolderTile(root: root, catalog: catalog, secret: secret, name: catalog.name, folderID: catalog.folders.first { $0.parentId == nil }?.id)
                 }.buttonStyle(.plain)
+                .overlay(alignment: .topTrailing) {
+                    if let folder = catalog.folders.first(where: { $0.parentId == nil }) { PhoneFavoriteButton(reference: FavoriteReference(space: "sealed", root: root.keyID, catalog: root.id, target: folder.id, kind: "folder")).padding(4) }
+                }
             } else if !error.isEmpty { Text(error).foregroundStyle(.red) }
             else { ProgressView("暗号化フォルダを復号中…") }
         }.task {
@@ -143,19 +188,25 @@ struct PhoneSealedFolderTile: View {
     }
 }
 struct PhoneSealedFolder: View {
+    @EnvironmentObject private var model: CloudViewerModel
     let root: SealedRoot; let catalog: SealedCatalog; let secret: MediaSecret; let folderID: String?
+    var favoritesOnly = false
+    @State private var query = ""
+    @State private var order: LibraryOrder = .name
+    private func ref(_ id: String, _ kind: String) -> FavoriteReference { FavoriteReference(space: "sealed", root: root.keyID, catalog: root.id, target: id, kind: kind) }
     @State private var selected: SealedItem?
-    private var items: [SealedItem] { catalog.items.filter { $0.folderId == folderID } }
+    private var items: [SealedItem] { order.arrange(catalog.items.filter { favoritesOnly ? model.isFavorite(ref($0.id, "item")) : $0.folderId == folderID }, query: query, name: { $0.name }, size: { $0.byteSize }) }
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                let children = catalog.folders.filter { $0.parentId == folderID }
+                let children = order.arrange(catalog.folders.filter { favoritesOnly ? model.isFavorite(ref($0.id, "folder")) : $0.parentId == folderID }, query: query, name: { $0.name }, size: { folder in catalog.items.filter { $0.folderId == folder.id }.reduce(0) { $0 + $1.byteSize } })
                 if !children.isEmpty {
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 14) {
                         ForEach(children) { folder in
                             NavigationLink { PhoneSealedFolder(root: root, catalog: catalog, secret: secret, folderID: folder.id) } label: {
                                 PhoneSealedFolderTile(root: root, catalog: catalog, secret: secret, name: folder.name, folderID: folder.id)
                             }.buttonStyle(.plain)
+                            .overlay(alignment: .topTrailing) { PhoneFavoriteButton(reference: ref(folder.id, "folder")).padding(4) }
                         }
                     }.padding(.horizontal, 12)
                 }
@@ -168,40 +219,200 @@ struct PhoneSealedFolder: View {
                 if children.isEmpty && items.isEmpty { ContentUnavailableView("空のフォルダ", systemImage: "folder") }
             }.padding(.vertical, 8)
         }.navigationTitle("").navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $query, prompt: "このフォルダ内を検索")
+        .toolbar {
+            ToolbarItem { ReaderSortPicker(order: $order) }
+            ToolbarItem { if let folderID { PhoneFavoriteButton(reference: ref(folderID, "folder")) } }
+        }
         .fullScreenCover(item: $selected) { item in PhoneSealedMediaScreen(root: root, items: items, secret: secret, initialID: item.id) }
     }
 }
+/// Screen-scoped plaintext only. No URLCache, DiskCache or file writes.
+@MainActor
+final class PhoneSealedImageSession: ObservableObject {
+    static let maximumMemoryBytes = 128 * 1024 * 1024
+    @Published private(set) var images: [String: UIImage] = [:]
+    @Published private(set) var errors: Set<String> = []
+    @Published private(set) var networkAllowsPrefetch = false
+    private var pending: [String: (UUID, Task<UIImage, Error>)] = [:]
+    private var order: [String] = []
+    private var generation = UUID()
+    private var closed = false
+    private let monitor = NWPathMonitor()
+
+    init(monitorNetwork: Bool = true) {
+        if monitorNetwork {
+            monitor.pathUpdateHandler = { [weak self] path in
+                let allowed = Self.allowsPrefetch(satisfied: path.status == .satisfied,
+                    wifi: path.usesInterfaceType(.wifi), wired: path.usesInterfaceType(.wiredEthernet),
+                    expensive: path.isExpensive, constrained: path.isConstrained)
+                Task { @MainActor [weak self] in
+                    guard let self, !self.closed else { return }
+                    self.networkAllowsPrefetch = allowed
+                }
+            }
+            monitor.start(queue: DispatchQueue(label: "media-hub.sealed-prefetch-path"))
+        }
+    }
+    nonisolated static func allowsPrefetch(satisfied: Bool, wifi: Bool, wired: Bool, expensive: Bool, constrained: Bool) -> Bool {
+        satisfied && (wifi || wired) && !expensive && !constrained
+    }
+    func select(current: String, next: String?, previous: String?) {
+        guard !closed else { return }
+        order = [current] + [next, previous].compactMap { $0 }
+        let allowed = Set(order)
+        let activeLoads = Set([current] + [next].compactMap { $0 })
+        for (id, task) in pending where !activeLoads.contains(id) { task.1.cancel(); pending[id] = nil }
+        images = images.filter { allowed.contains($0.key) }
+        errors = errors.intersection(allowed)
+        trim()
+    }
+    private func trim() {
+        var remaining = Self.maximumMemoryBytes
+        images = order.reduce(into: [:]) { kept, id in
+            guard let image = images[id], let cg = image.cgImage else { return }
+            let bytes = cg.bytesPerRow * cg.height
+            if bytes <= remaining { kept[id] = image; remaining -= bytes }
+        }
+    }
+    func image(_ item: SealedItem, authorized: @escaping () -> Bool,
+               load: @escaping () async throws -> Data) async throws -> UIImage {
+        guard !closed, authorized(), order.contains(item.objectID) else { throw CancellationError() }
+        if let cached = images[item.objectID] { return cached }
+        let task: Task<UIImage, Error>
+        if let existing = pending[item.objectID] { task = existing.1 }
+        else {
+            let ticket = UUID(), epoch = generation
+            errors.remove(item.objectID)
+            task = Task {
+                defer { if self.pending[item.objectID]?.0 == ticket { self.pending[item.objectID] = nil } }
+                do {
+                    let bytes = try await load()
+                    try Task.checkCancellation()
+                    let value = try await Self.prepare(bytes, item: item)
+                    try Task.checkCancellation()
+                    guard !self.closed, self.generation == epoch, authorized(), self.order.contains(item.objectID) else { throw CancellationError() }
+                    self.images[item.objectID] = value
+                    self.trim()
+                    return value
+                } catch {
+                    if !Task.isCancelled, !self.closed, self.generation == epoch, authorized(), self.order.contains(item.objectID) {
+                        self.errors.insert(item.objectID)
+                    }
+                    throw error
+                }
+            }
+            pending[item.objectID] = (ticket, task)
+        }
+        let value = try await task.value
+        try Task.checkCancellation()
+        guard !closed, authorized() else { throw CancellationError() }
+        return value
+    }
+    nonisolated static func prepare(_ bytes: Data, item: SealedItem) async throws -> UIImage {
+        try await Task.detached(priority: .userInitiated) {
+            guard Int64(bytes.count) == item.byteSize,
+                  SHA256.hash(data: bytes).map({ String(format: "%02x", $0) }).joined() == item.sha256,
+                  let source = CGImageSourceCreateWithData(bytes as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+                  let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceShouldCacheImmediately: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 4096
+                  ] as CFDictionary) else { throw SealedError.invalid }
+            return UIImage(cgImage: cg)
+        }.value
+    }
+    func close() {
+        closed = true; generation = UUID()
+        monitor.cancel(); monitor.pathUpdateHandler = nil
+        for task in pending.values { task.1.cancel() }
+        pending = [:]; images = [:]; errors = []; order = []; networkAllowsPrefetch = false
+    }
+    deinit { monitor.cancel() }
+}
+
+@MainActor
+private func phoneSealedPhoto(_ model: CloudViewerModel, root: SealedRoot, secret: MediaSecret, item: SealedItem) async throws -> Data {
+    let reader = phoneSealedReader(model, root: root, secret: secret, objectID: item.objectID, length: item.byteSize, maximum: 100 * 1024 * 1024)
+    return try await withTaskCancellationHandler {
+        do {
+            let bytes = try await reader.allData()
+            await reader.close()
+            return bytes
+        } catch { await reader.close(); throw error }
+    } onCancel: { Task { await reader.close() } }
+}
+
 struct PhoneSealedMediaScreen: View {
+    @Environment(\.scenePhase) private var scenePhase
+    @AppStorage("sealedPhotoPrefetch") private var prefetchEnabled = true
+    @StateObject private var photos = PhoneSealedImageSession()
+    @State private var retry = 0
+    @State private var prefetchSuspended = false
+    @EnvironmentObject private var model: CloudViewerModel
     @Environment(\.dismiss) private var dismiss
     let root: SealedRoot; let items: [SealedItem]; let secret: MediaSecret; let initialID: String
-    @State private var index = 0
+    @State private var index: Int
     @State private var controls = true
+    @State private var zoomed = false
+    init(root: SealedRoot, items: [SealedItem], secret: MediaSecret, initialID: String) {
+        self.root = root; self.items = items; self.secret = secret; self.initialID = initialID
+        _index = State(initialValue: items.firstIndex { $0.id == initialID } ?? 0)
+    }
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            PhoneSealedMedia(root: root, item: items[index], secret: secret, controls: $controls, onSwipe: move)
-                .id(items[index].id)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .simultaneousGesture(DragGesture(minimumDistance: 40).onEnded { value in
-                    guard items[index].mimeType.hasPrefix("video/"), abs(value.translation.width) > abs(value.translation.height) else { return }
-                    move(value.translation.width < 0 ? 1 : -1)
-                })
+            NativeMediaPager(count: items.count, selection: $index, enabled: !zoomed && items[index].mimeType != "application/pdf") { position, active in
+                PhoneSealedMedia(root: root, item: items[position], secret: secret, photos: photos, controls: $controls,
+                                 active: active && scenePhase == .active, onZoom: { if active { zoomed = $0 } }, onRetry: { retry += 1 })
+                    .environmentObject(model)
+            }.ignoresSafeArea()
             if controls || items[index].mimeType.hasPrefix("video/") {
                 VStack {
                     HStack {
                         Button { dismiss() } label: { Image(systemName: "xmark").padding(12).background(.black.opacity(0.5), in: Circle()) }.accessibilityLabel("閉じる")
                         Spacer()
+                        Text("\(index + 1) / \(items.count)").font(.caption.monospacedDigit())
+                        PhoneFavoriteButton(reference: FavoriteReference(space: "sealed", root: root.keyID, catalog: root.id, target: items[index].id, kind: "item"))
+                        if items[index].mimeType == "application/pdf" {
+                            Button { move(-1) } label: { Image(systemName: "chevron.left").padding(10) }.disabled(index == 0).accessibilityLabel("前のファイル")
+                            Button { move(1) } label: { Image(systemName: "chevron.right").padding(10) }.disabled(index + 1 == items.count).accessibilityLabel("次のファイル")
+                        }
                     }.foregroundStyle(.white).padding()
                     Spacer()
                 }
             }
-        }.onAppear { index = items.firstIndex { $0.id == initialID } ?? 0 }
+        }.onChange(of: index) { _, _ in controls = true; zoomed = false }
+        .task(id: "\(index)/\(photos.networkAllowsPrefetch)/\(prefetchEnabled)/\(retry)/\(prefetchSuspended)") { await preparePhotos() }
+        .onChange(of: scenePhase) { _, phase in if phase != .active { photos.close(); dismiss() } }
+        .onChange(of: model.sessionID) { _, _ in photos.close(); dismiss() }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("MediaHubEncryptionKeyChanged"))) { _ in photos.close(); dismiss() }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+            prefetchSuspended = true
+            photos.select(current: items[index].objectID, next: nil, previous: nil)
+        }
+        .onDisappear { photos.close() }
     }
-    private func move(_ direction: Int) {
-        let next = index + direction
-        if items.indices.contains(next) { index = next; controls = true }
+    private func preparePhotos() async {
+        guard scenePhase == .active, model.signedIn, model.hiddenPagesOpen else { return }
+        let identity = model.sessionID
+        let current = items[index]
+        let next = items.indices.contains(index + 1) && prefetchEnabled && !prefetchSuspended && photos.networkAllowsPrefetch ? items[index + 1] : nil
+        let previous = !prefetchSuspended && items.indices.contains(index - 1) ? items[index - 1].objectID : nil
+        photos.select(current: current.objectID, next: next?.objectID, previous: previous)
+        let authorized = { model.sessionID == identity && model.signedIn && model.hiddenPagesOpen }
+        guard !current.mimeType.hasPrefix("video/"), current.mimeType != "application/pdf" else { return }
+        do {
+            _ = try await photos.image(current, authorized: authorized) { try await phoneSealedPhoto(model, root: root, secret: secret, item: current) }
+            guard !Task.isCancelled, authorized(), let next, photos.images[next.objectID] == nil,
+                  model.reserveSealedPhotoPrefetch(root, item: next) else { return }
+            _ = try await photos.image(next, authorized: authorized) { try await phoneSealedPhoto(model, root: root, secret: secret, item: next) }
+        } catch { /* Display failure is published by the screen-scoped session. */ }
     }
+    private func move(_ direction: Int) { let next = index + direction; if items.indices.contains(next) { index = next } }
 }
+
 struct PhoneSealedThumbnail: View {
     @EnvironmentObject private var model: CloudViewerModel
     let root: SealedRoot; let item: SealedItem; let secret: MediaSecret
@@ -230,11 +441,13 @@ struct PhoneSealedThumbnail: View {
 struct PhoneSealedMedia: View {
     @EnvironmentObject private var model: CloudViewerModel
     let root: SealedRoot; let item: SealedItem; let secret: MediaSecret
-    @State private var image: UIImage?
+    @ObservedObject var photos: PhoneSealedImageSession
     @State private var pdf: Data?
     @State private var player: AVPlayer?
     @Binding var controls: Bool
-    let onSwipe: (Int) -> Void
+    let active: Bool
+    let onZoom: (Bool) -> Void
+    var onRetry: () -> Void = {}
     @State private var loader: SealedPlayerLoader?
     @State private var reader: SealedRangeReader?
     @State private var error = ""
@@ -242,11 +455,16 @@ struct PhoneSealedMedia: View {
     var body: some View {
         Group {
             if let pdf { MediaPDFReader(data: pdf).padding(.top, 64) }
-            else if let image { PhoneZoomableImage(image: image, onTap: { controls.toggle() }, onSwipe: onSwipe) }
+            else if let image = photos.images[item.objectID] { PhoneZoomableImage(image: image, onTap: { controls.toggle() }, onZoomChanged: onZoom) }
             else if let player { ReaderVideoPlayer(player: player).id(ObjectIdentifier(player)) }
+            else if photos.errors.contains(item.objectID) {
+                VStack { Text("鍵・通信・ファイルサイズを確認してください。"); Button("再試行", action: onRetry) }.foregroundStyle(.white)
+            }
             else if !error.isEmpty { Text(error).foregroundStyle(.red) }
             else { ReaderLoadingView(status: loadingStatus) }
-        }.task {
+        }.frame(maxWidth: .infinity, maxHeight: .infinity).background(.black)
+        .task(id: active) {
+            guard active, item.mimeType.hasPrefix("video/") || item.mimeType == "application/pdf" else { return }
             let identity = model.sessionID
             let reader = phoneSealedReader(model, root: root, secret: secret, objectID: item.objectID, length: item.byteSize, maximum: item.mimeType.hasPrefix("video/") ? 5 * 1024 * 1024 * 1024 : (item.mimeType == "application/pdf" ? PDFLimits.maximumBytes : 100 * 1024 * 1024))
             self.reader = reader
@@ -260,14 +478,16 @@ struct PhoneSealedMedia: View {
                     loadingStatus = "照合・表示準備中…"
                     guard SHA256.hash(data: bytes).map({ String(format: "%02x", $0) }).joined() == item.sha256 else { throw SealedError.invalid }
                     guard identity == model.sessionID, !Task.isCancelled else { return }
-                    if item.mimeType == "application/pdf" { pdf = bytes }
-                    else {
-                        guard let value = UIImage(data: bytes) else { throw SealedError.invalid }
-                        image = value
-                    }
+                    pdf = bytes
                 }
-            } catch { if identity == model.sessionID { self.error = "鍵・通信・ファイルサイズを確認してください。" } }
-        }.onDisappear { player?.pause(); player = nil; loader?.close(); loader = nil; image = nil; pdf = nil; if let reader { Task { await reader.close() } }; reader = nil }
+            } catch { if !Task.isCancelled, identity == model.sessionID { self.error = "鍵・通信・ファイルサイズを確認してください。" } }
+        }.onChange(of: active) { _, active in if !active { clear() } }
+        .onDisappear { clear() }
+    }
+    private func clear() {
+        player?.pause(); player = nil; loader?.close(); loader = nil; pdf = nil; error = ""
+        if let reader { Task { await reader.close() } }; reader = nil
+
     }
 }
 

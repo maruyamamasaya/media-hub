@@ -695,6 +695,9 @@
         },
         "completedAt": {
           "type": "number"
+        },
+        "rootId": {
+          "type": "string"
         }
       }
     },
@@ -1223,6 +1226,34 @@
           "items": {
             "type": "string"
           }
+        }
+      }
+    },
+    "FavoriteReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "space",
+        "rootId",
+        "catalogId",
+        "targetId",
+        "kind"
+      ],
+      "properties": {
+        "space": {
+          "type": "string"
+        },
+        "rootId": {
+          "type": "string"
+        },
+        "catalogId": {
+          "type": "string"
+        },
+        "targetId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
         }
       }
     }

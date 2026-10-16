@@ -124,8 +124,12 @@ func macSealedReader(_ model: MacModel, root: SealedRoot, secret: MediaSecret, o
     return SealedRangeReader(objectID: objectID ?? root.id, master: secret.masterKey, expectedLength: length, maximumLength: maximum) { range in try await http.bytes(range) }
 }
 struct SealedLibraryScreen: View {
+    var favoritesOnly = false
     @EnvironmentObject var model: MacModel
     @State private var roots: [SealedRoot] = []
+    @State private var loaded: [String: SealedCatalog] = [:]
+    @State private var query = ""
+    @State private var order: LibraryOrder = .name
     @State private var secret: MediaSecret?
     var body: some View {
         NavigationStack {
@@ -133,15 +137,27 @@ struct SealedLibraryScreen: View {
                 VStack(alignment: .leading, spacing: 20) {
                     if let secret {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 130, maximum: 210), spacing: 12)], spacing: 12) {
-                            ForEach(roots.filter { $0.keyID == secret.keyID }) { root in SealedRootTile(root: root, secret: secret) }
+                            ForEach(sortedRoots(secret)) { root in
+                                SealedRootTile(root: root, secret: secret, favoritesOnly: favoritesOnly) { loaded[root.id] = $0 }
+                            }
                         }.padding(.horizontal, 24)
                         if roots.filter({ $0.keyID == secret.keyID }).isEmpty { Text("暗号化して保存したフォルダはまだありません。").foregroundStyle(.secondary).padding(24) }
                         DisclosureGroup("暗号化の鍵") { SealedKeyManagement() }.padding(.horizontal, 24)
                     } else { SealedKeyManagement() }
                 }.padding(20)
-            }.toolbar { Button("更新", systemImage: "arrow.clockwise") { Task { await load() } } }
+            }.searchable(text: $query, prompt: "暗号化フォルダ名で検索")
+            .toolbar { LibrarySortPicker(order: $order); Button("更新", systemImage: "arrow.clockwise") { Task { await load() } } }
         }.task { await load() }
             .onChange(of: model.encryptionReady) { _ in Task { await load() } }
+    }
+    private func sortedRoots(_ secret: MediaSecret) -> [SealedRoot] {
+        let matching = roots.filter { root in
+            root.keyID == secret.keyID && (!favoritesOnly || model.favorites.contains { $0.space == "sealed" && $0.rootId == root.keyID && $0.catalogId == root.id })
+        }
+        // Unloaded roots stay mounted until their names can be checked locally.
+        return order.arrange(matching, query: "", name: { loaded[$0.id]?.name ?? $0.id }, size: { loaded[$0.id]?.items.reduce(0) { $0 + $1.byteSize } ?? 0 }).filter {
+            query.isEmpty || loaded[$0.id] == nil || loaded[$0.id]!.name.localizedStandardContains(query)
+        }
     }
     private func load() async {
         await model.run {
@@ -154,12 +170,17 @@ struct SealedRootTile: View {
     @EnvironmentObject var model: MacModel
     let root: SealedRoot
     let secret: MediaSecret
+    var favoritesOnly = false
+    var onLoaded: (SealedCatalog) -> Void = { _ in }
     @State private var catalog: SealedCatalog?
     @State private var failed = false
     var body: some View {
         Group {
             if let catalog {
-                NavigationLink { SealedFolderScreen(root: root, catalog: catalog, secret: secret, folderID: catalog.folders.first { $0.parentId == nil }?.id) } label: { FolderTile(name: catalog.name, protection: "内容・名前：暗号化済み", detail: "\(catalog.items.count)件") }.buttonStyle(.plain)
+                NavigationLink { SealedFolderScreen(root: root, catalog: catalog, secret: secret, folderID: catalog.folders.first { $0.parentId == nil }?.id, favoritesOnly: favoritesOnly) } label: { FolderTile(name: catalog.name, protection: "内容・名前：暗号化済み", detail: "\(catalog.items.count)件") }.buttonStyle(.plain)
+                    .overlay(alignment: .topTrailing) {
+                        if let folder = catalog.folders.first(where: { $0.parentId == nil }) { MacFavoriteButton(reference: FavoriteReference(space: "sealed", root: root.keyID, catalog: root.id, target: folder.id, kind: "folder")).padding(6) }
+                    }
             } else { FolderTile(name: failed ? "復号できません" : "暗号化フォルダを読込中…") }
         }.task {
             let identity = model.privacyID
@@ -167,32 +188,41 @@ struct SealedRootTile: View {
             do {
                 let value = try JSONDecoder().decode(SealedCatalog.self, from: await reader.allData())
                 try value.validate(root: root, secret: secret)
-                if identity == model.privacyID, !Task.isCancelled { catalog = value }
+                if identity == model.privacyID, !Task.isCancelled { catalog = value; onLoaded(value) }
             } catch { if identity == model.privacyID { failed = true; model.handle(error) } }
             await reader.close()
         }
     }
 }
 struct SealedFolderScreen: View {
+    @EnvironmentObject private var model: MacModel
     let root: SealedRoot
     let catalog: SealedCatalog
     let secret: MediaSecret
     let folderID: String?
+    var favoritesOnly = false
+    private func ref(_ id: String, _ kind: String) -> FavoriteReference { FavoriteReference(space: "sealed", root: root.keyID, catalog: root.id, target: id, kind: kind) }
+    @State private var query = ""
+    @State private var order: LibraryOrder = .name
     @State private var selected: GallerySelection?
-    private var folders: [SealedFolder] { catalog.folders.filter { $0.parentId == folderID } }
-    private var files: [SealedItem] { catalog.items.filter { $0.folderId == folderID } }
+    private var folders: [SealedFolder] { order.arrange(catalog.folders.filter { favoritesOnly ? model.isFavorite(ref($0.id, "folder")) : $0.parentId == folderID }, query: query, name: { $0.name }, size: { folder in catalog.items.filter { $0.folderId == folder.id }.reduce(0) { $0 + $1.byteSize } }) }
+    private var files: [SealedItem] { order.arrange(catalog.items.filter { favoritesOnly ? model.isFavorite(ref($0.id, "item")) : $0.folderId == folderID }, query: query, name: { $0.name }, size: { $0.byteSize }) }
     var body: some View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 130, maximum: 210), spacing: 12)], spacing: 12) {
                 ForEach(folders) { folder in
                     NavigationLink { SealedFolderScreen(root: root, catalog: catalog, secret: secret, folderID: folder.id) } label: { FolderTile(name: folder.name) }.buttonStyle(.plain)
+                        .overlay(alignment: .topTrailing) { MacFavoriteButton(reference: ref(folder.id, "folder")).padding(6) }
                 }
                 ForEach(files) { item in
                     Button { selected = GallerySelection(id: item.id) } label: { SquareTile(title: item.name) { SealedThumbnail(root: root, item: item, secret: secret) } }.buttonStyle(.plain)
+                        .overlay(alignment: .topTrailing) { MacFavoriteButton(reference: ref(item.id, "item")).padding(6) }
                 }
             }.padding(20)
             if folders.isEmpty && files.isEmpty { Text("このフォルダは空です。").foregroundStyle(.secondary).padding(40) }
         }.navigationTitle(catalog.folders.first { $0.id == folderID }?.name ?? catalog.name)
+            .searchable(text: $query, prompt: "このフォルダ内を検索")
+            .toolbar { LibrarySortPicker(order: $order) }
             .sheet(item: $selected) { item in SealedMediaGallery(root: root, items: files, secret: secret, initialID: item.id) }
     }
 }
@@ -217,6 +247,7 @@ struct SealedThumbnail: View {
     }
 }
 struct SealedMediaGallery: View {
+    @EnvironmentObject private var model: MacModel
     @Environment(\.dismiss) private var dismiss
     let root: SealedRoot
     let items: [SealedItem]
@@ -236,6 +267,7 @@ struct SealedMediaGallery: View {
                 Button { dismiss() } label: { Image(systemName: "xmark") }
                     .keyboardShortcut(.cancelAction).help("閉じる（Esc）").accessibilityLabel("一覧に戻る")
                 Text(current?.name ?? "ファイル").font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
+                if let current { MacFavoriteButton(reference: FavoriteReference(space: "sealed", root: root.keyID, catalog: root.id, target: current.id, kind: "item")) }
                 Spacer()
                 if let index { Text("\(index + 1) / \(items.count)").font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit() }
             }.buttonStyle(.borderless).padding(.horizontal, 18).padding(.vertical, 14)

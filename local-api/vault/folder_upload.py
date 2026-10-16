@@ -1,5 +1,6 @@
 """Manual, copy-only folder uploads. No watchers or startup cloud operations."""
 import base64
+from contextlib import nullcontext
 import hashlib
 import json
 import mimetypes
@@ -17,6 +18,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'backend'))
 
 from .service import VaultError
+from .upload_performance import UploadPerformance, timed_stage, timed_s3
 from catalog_limits import MAX_CATALOG_BYTES
 
 GIB = 1024 ** 3
@@ -74,10 +76,13 @@ from .multipart_upload import MultipartUpload
 class S3CLI(MultipartUpload):
     def __init__(self, bucket, profile, region, recorder=None):
         self.bucket = bucket
+        self.profile = profile
+        self.region = region
         self.recorder = recorder
         self.timeout = 7200
         self.options = ['--profile', profile, '--region', region, '--no-cli-pager', '--output', 'json', '--cli-error-format', 'legacy']
 
+    @timed_s3
     def call(self, operation, *args, missing=False):
         self.record(requests=1)
         result = subprocess.run(['aws', *self.options, 's3api', operation, '--bucket', self.bucket, *args], capture_output=True, text=True, timeout=self.timeout)
@@ -86,6 +91,8 @@ class S3CLI(MultipartUpload):
                                      'unable to locate credentials', 'token has expired', 'sso session associated')
             if any(value in result.stderr.lower() for value in authentication_errors):
                 raise VaultError('aws_login_required', 'AWSへの再ログインが必要です。ログイン後に接続を確認してください。', 401)
+            if '(PreconditionFailed)' in result.stderr or '(ConditionalRequestConflict)' in result.stderr:
+                raise VaultError('conflict', '保存情報が更新されました。最新の情報で再試行してください。', 409)
             if '(NoSuchUpload)' in result.stderr:
                 raise VaultError('multipart_expired', '途中送信の期限が切れています。', 409)
             if missing and ('(404)' in result.stderr or '(NoSuchKey)' in result.stderr):
@@ -190,8 +197,12 @@ class FolderUploads:
         self.client_factory = client_factory
         from .upload_duplicates import CatalogCache
         self.duplicate_catalog_cache = CatalogCache()
+        from .thumbnail_cache import ThumbnailCache
+        self.thumbnail_cache = ThumbnailCache(self.root / "thumbnail-cache")
         self.running = set()
         self.live = {}
+        self._performance = {}
+        self._progress_plans = {}
         self.scan_jobs = {}
         self.scan_running = False
         self.queue = []
@@ -215,12 +226,14 @@ class FolderUploads:
             raise VaultError('invalid_request', '転送IDが不正です。')
         return self.root / plan_id / 'plan.json'
 
+    @timed_stage('state_read')
     def read(self, plan_id):
         path = self.path(plan_id)
         if not path.is_file():
             raise VaultError('not_found', '転送が見つかりません。', 404)
         return json.loads(path.read_text())
 
+    @timed_stage('state_save')
     def save(self, plan):
         atomic_json(self.path(plan['id']), plan)
 
@@ -230,6 +243,7 @@ class FolderUploads:
             'items': [{k: item[k] for k in ('id', 'name', 'folderId', 'relativePath', 'byteSize', 'state')} for item in plan['items']],
             'completed': sum(i['state'] == 'verified' for i in plan['items']), 'skipped': plan['skipped'],
             'duplicateCount': plan.get('duplicateCount', 0),
+            'rootId': plan['rootId'],
         } | ({'completedAt': plan['completedAt']} if 'completedAt' in plan else {}) | ({'progress': dict(self.live[plan['id']])} if plan['id'] in self.live and
              plan['byteSize'] == self.live[plan['id']]['totalBytes'] else {})
 
@@ -280,8 +294,17 @@ class FolderUploads:
             target = directory / 'content'
             try:
                 client = self.client_factory(plan['bucket'], plan['profile'], plan['region'])
-                client.download(key, item.get('thumbnailVersionId') if thumbnail else item.get('versionId'), target)
                 expected = item.get('thumbnailSHA256') if thumbnail else item['sha256']
+                cache_id = json.dumps([plan['bucket'], plan['profile'], plan['region'], key, item.get('thumbnailVersionId'), expected])
+                generation = self.thumbnail_cache.generation
+                try:
+                    cached = self.thumbnail_cache.read(cache_id, expected) if thumbnail and expected else None
+                except OSError:
+                    cached = None  # Cache availability must not prevent a verified S3 read.
+                if cached is not None:
+                    target.write_bytes(cached)
+                else:
+                    client.download(key, item.get('thumbnailVersionId') if thumbnail else item.get('versionId'), target)
                 maximum = 50_000 if thumbnail else item['byteSize']
                 if (not expected or target.stat().st_size > maximum or
                         (not thumbnail and target.stat().st_size != item['byteSize'])):
@@ -289,6 +312,11 @@ class FolderUploads:
                 with target.open('rb') as stream:
                     if hashlib.file_digest(stream, 'sha256').hexdigest() != expected:
                         raise VaultError('integrity', '取得データの照合に失敗しました。', 409)
+                if thumbnail and cached is None:
+                    try:
+                        self.thumbnail_cache.store(cache_id, target.read_bytes(), expected, generation)
+                    except OSError:
+                        pass  # A cache write failure does not invalidate verified media.
                 return target, 'image/png' if thumbnail else item['mimeType'], item['name']
             except Exception:
                 shutil.rmtree(directory)
@@ -301,7 +329,7 @@ class FolderUploads:
 
     def ensure_thumbnail(self, client, plan, item, snapshot=None):
         key = f'media-hub/thumbnails/{item["id"]}/{item["sha256"]}.png'
-        remote = client.head(key)
+        remote = None if getattr(client, 'direct_put', False) and snapshot is not None else client.head(key)
         if remote is None:
             with tempfile.TemporaryDirectory(dir=self.root, prefix='preview-build-') as temp:
                 output = Path(temp) / 'preview.png'
@@ -315,53 +343,58 @@ class FolderUploads:
                     source = Path(temp) / 'source'
                     client.download(item['objectKey'], item.get('versionId'), source)
                     stream = source.open('rb')
-                with stream:
-                    if not snapshot and hashlib.file_digest(stream, 'sha256').hexdigest() != item['sha256']:
-                        raise VaultError('changed_file', 'サムネイル作成元の原本が変わっています。', 409)
-                    stream.seek(0)
-                    from PIL import Image, ImageOps
-                    import warnings
-                    try:
-                        with warnings.catch_warnings():
-                            warnings.simplefilter('error', Image.DecompressionBombWarning)
-                            if item['mimeType'].startswith('video/'):
-                                ffmpeg = shutil.which('ffmpeg')
-                                if not ffmpeg:
-                                    return False
-                                result = subprocess.run([ffmpeg, '-v', 'error', '-i', f'/dev/fd/{stream.fileno()}',
-                                    '-frames:v', '1', '-vf', 'scale=320:320:force_original_aspect_ratio=decrease',
-                                    '-y', str(output)], pass_fds=(stream.fileno(),), capture_output=True, timeout=60)
-                                if result.returncode:
-                                    return False
-                                image_source = output
-                            elif item['mimeType'] == 'application/pdf':
-                                from .pdf_preview import render_pdf
-                                if not render_pdf(f'/dev/fd/{stream.fileno()}', output, pass_fds=(stream.fileno(),)):
-                                    return False
-                                image_source = output
-                            elif item['mimeType'].startswith('image/'):
-                                image_source = stream
-                            else:
-                                return False
-                            with Image.open(image_source) as image:
-                                # JPEG decoder downsizing avoids expanding full-resolution pixels.
-                                image.draft('RGB', (640, 640))
-                                preview = ImageOps.exif_transpose(image).convert('RGBA')
-                                preview.info.clear()
-                                preview.thumbnail((320, 320))
-                                while True:
-                                    preview.save(output, format='PNG', optimize=True)
-                                    if output.stat().st_size <= 50_000:
-                                        break
-                                    preview.thumbnail((max(1, preview.width * 3 // 4), max(1, preview.height * 3 // 4)))
-                        stream.seek(0)
+                metrics = self._performance.get(plan['id'])
+                with metrics.measure('thumbnail_prepare') if metrics else nullcontext():
+                    with stream:
                         if not snapshot and hashlib.file_digest(stream, 'sha256').hexdigest() != item['sha256']:
-                            raise VaultError('changed_file', 'サムネイル作成中に原本が変わりました。', 409)
-                    except (OSError, ValueError, Image.DecompressionBombWarning, Image.DecompressionBombError, subprocess.TimeoutExpired):
-                        return False
+                            raise VaultError('changed_file', 'サムネイル作成元の原本が変わっています。', 409)
+                        stream.seek(0)
+                        from PIL import Image, ImageOps
+                        import warnings
+                        try:
+                            with warnings.catch_warnings():
+                                warnings.simplefilter('error', Image.DecompressionBombWarning)
+                                if item['mimeType'].startswith('video/'):
+                                    ffmpeg = shutil.which('ffmpeg')
+                                    if not ffmpeg:
+                                        return False
+                                    result = subprocess.run([ffmpeg, '-v', 'error', '-i', f'/dev/fd/{stream.fileno()}',
+                                        '-frames:v', '1', '-vf', 'scale=320:320:force_original_aspect_ratio=decrease',
+                                        '-y', str(output)], pass_fds=(stream.fileno(),), capture_output=True, timeout=60)
+                                    if result.returncode:
+                                        return False
+                                    image_source = output
+                                elif item['mimeType'] == 'application/pdf':
+                                    from .pdf_preview import render_pdf
+                                    if not render_pdf(f'/dev/fd/{stream.fileno()}', output, pass_fds=(stream.fileno(),)):
+                                        return False
+                                    image_source = output
+                                elif item['mimeType'].startswith('image/'):
+                                    image_source = stream
+                                else:
+                                    return False
+                                with Image.open(image_source) as image:
+                                    # JPEG decoder downsizing avoids expanding full-resolution pixels.
+                                    image.draft('RGB', (640, 640))
+                                    preview = ImageOps.exif_transpose(image).convert('RGBA')
+                                    preview.info.clear()
+                                    preview.thumbnail((320, 320))
+                                    while True:
+                                        preview.save(output, format='PNG', optimize=True)
+                                        if output.stat().st_size <= 50_000:
+                                            break
+                                        preview.thumbnail((max(1, preview.width * 3 // 4), max(1, preview.height * 3 // 4)))
+                            stream.seek(0)
+                            if not snapshot and hashlib.file_digest(stream, 'sha256').hexdigest() != item['sha256']:
+                                raise VaultError('changed_file', 'サムネイル作成中に原本が変わりました。', 409)
+                        except (OSError, ValueError, Image.DecompressionBombWarning, Image.DecompressionBombError, subprocess.TimeoutExpired):
+                            return False
                 digest = base64.b64encode(hashlib.sha256(output.read_bytes()).digest()).decode()
-                client.put(output, key, digest, 'image/png')
-                remote = client.head(key)
+                if getattr(client, 'direct_put', False):
+                    remote = client.put_verified(output, key, digest, 'image/png')
+                else:
+                    client.put(output, key, digest, 'image/png')
+                    remote = client.head(key)
                 if not remote or remote.get('ChecksumSHA256') != digest or remote.get('ContentLength') != output.stat().st_size:
                     raise VaultError('integrity', 'サムネイルのS3照合に失敗しました。', 409)
         try:
@@ -465,6 +498,7 @@ class FolderUploads:
         return size
 
     def scan(self, body, progress=None):
+        metrics = UploadPerformance()
         if set(body) != {'path', 'bucket', 'profile', 'region'} or not all(isinstance(v, str) and v.strip() for v in body.values()):
             raise VaultError('invalid_request', 'フォルダとAWS接続先を指定してください。')
         import re
@@ -489,6 +523,7 @@ class FolderUploads:
         items, candidates, skipped, total_bytes = [], [], 0, 0
         def walk_error(error):
             raise VaultError('unreadable_folder', '読み取れないフォルダがあります。権限を確認してください。', 409)
+        enumeration_started = time.perf_counter()
         for directory, dirs, files in os.walk(source_root, followlinks=False, onerror=walk_error):
             parent = Path(directory)
             dirs[:] = sorted(d for d in dirs if not d.startswith('.') and not (parent / d).is_symlink())
@@ -515,6 +550,7 @@ class FolderUploads:
                 candidates.append((path, signature(before)))
                 if len(candidates) > 10000:
                     raise VaultError('too_large', '1回の確認は素材10,000件までです。', 413)
+        enumeration_seconds = time.perf_counter() - enumeration_started
         read_bytes = 0
         if progress:
             progress(0, source_root.name, total_bytes)
@@ -533,30 +569,43 @@ class FolderUploads:
                 before = os.fstat(stream.fileno())
                 if signature(before) != expected_signature:
                     raise VaultError('changed_file', '確認中に原本が変更されました。もう一度確認してください。', 409)
-                digest, composite = hash_stream(stream,
-                    progress=report)
+                with metrics.measure('sha256'):
+                    digest, composite = hash_stream(stream, progress=report)
                 if signature(before) != signature(os.fstat(stream.fileno())):
                     raise VaultError('changed_file', '確認中に原本が変更されました。もう一度確認してください。', 409)
             relative = path.relative_to(source_root).as_posix()
             folder = path.parent.relative_to(source_root).as_posix()
             asset_id = str(uuid.uuid5(uuid.UUID(root_id), 'asset:' + relative))
+            with metrics.measure('mime_metadata'):
+                mime = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
             return {'id': asset_id, 'name': path.name, 'folderId': folder_id('' if folder == '.' else folder),
                           'relativePath': relative, 'byteSize': before.st_size, 'sha256': digest,
                           'multipartSHA256': composite, 'signature': signature(before), 'state': 'pending',
                           'objectKey': f'media-hub/originals/{asset_id}/{digest}',
-                          'mimeType': mimetypes.guess_type(path.name)[0] or 'application/octet-stream'}
+                          'mimeType': mime}
         # Preserve deterministic catalog order, while hashing independent files concurrently.
-        with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as executor:
-            items = list(executor.map(inspect, candidates))
+        with metrics.measure('hash_workers_wall'):
+            with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as executor:
+                items = list(executor.map(inspect, candidates))
         plan = {'id': plan_id, 'rootId': root_id, 'name': source_root.name, 'sourceRoot': str(source_root),
                 **{k: body[k] for k in ('bucket', 'profile', 'region')}, 'state': 'planned', 'error': '',
-                'folders': folders, 'items': items, 'skipped': skipped, 'byteSize': sum(i['byteSize'] for i in items), 'stop': False}
+                'freshUpload': True, 'folders': folders, 'items': items, 'skipped': skipped, 'byteSize': sum(i['byteSize'] for i in items), 'stop': False}
         if plan['byteSize'] > 20 * GIB:
             raise VaultError('too_large', '初期版は1回20GiBまでです。小さい単位のフォルダを選んでください。', 413)
         self.check_catalog_capacity(plan)
         with self.lock:
             self.save(plan)
+        result = metrics.result()
+        result.update(enumerationSeconds=enumeration_seconds, itemCount=len(items), sourceBytes=plan['byteSize'])
+        self.save_performance(plan_id, 'scan-performance.json', result)
         return self.public(plan)
+
+    def save_performance(self, plan_id, filename, result):
+        # Diagnostics must never change transfer success or recovery behavior.
+        try:
+            atomic_json(self.path(plan_id).parent / filename, result)
+        except (OSError, ValueError):
+            pass
 
     @staticmethod
     def open_source(root, path):
@@ -614,6 +663,7 @@ class FolderUploads:
                 raise VaultError('not_found', 'フォルダの確認記録がありません。', 404)
             return dict(self.scan_jobs[job_id])
 
+    @timed_stage('snapshot_copy_hash')
     def snapshot(self, plan, item, target):
         with self.open_source(Path(plan['sourceRoot']), Path(plan['sourceRoot']) / item['relativePath']) as stream:
             if signature(os.fstat(stream.fileno())) != item['signature']:
@@ -625,6 +675,7 @@ class FolderUploads:
                 raise VaultError('changed_file', '原本の照合に失敗しました。送信を停止しました。', 409)
         return composite
 
+    @timed_stage('progress_update')
     def report(self, plan_id, item, phase, amount=0):
         with self.lock:
             live = self.live.setdefault(plan_id, {'phase': phase, 'name': '', 'bytes': 0, 'totalBytes': 0, 'remainingSeconds': None, 'activeFiles': 0})
@@ -633,8 +684,11 @@ class FolderUploads:
             sent = amount if phase == 'uploading' else item['byteSize'] if phase == 'thumbnail' else 0
             workers[item['id']] = (phase, item['name'], max(previous, sent))
             live.update(phase=phase, name=item['name'], activeFiles=len(workers))
-            # Count verified bytes and current transfer bytes; preparation is displayed separately.
-            plan = self.read(plan_id)
+            # Worker state is guarded by the same lock. Only presentation uses this
+            # in-memory view; stop checks and durable checkpoints still use disk.
+            plan = self._progress_plans.get(plan_id)
+            if plan is None:
+                plan = self.read(plan_id)
             verified = sum(i['byteSize'] for i in plan['items'] if i['state'] == 'verified')
             active = sum(n for key, (p, _, n) in workers.items() if next(i for i in plan['items'] if i['id'] == key)['state'] != 'verified')
             live['bytes'] = min(plan['byteSize'], verified + active)
@@ -650,15 +704,19 @@ class FolderUploads:
                 lambda: self.stopped(plan['id']), lambda n: self.report(plan['id'], item, 'uploading', min(n, item['byteSize'])))
         else:
             self.report(plan['id'], item, 'uploading')
+            if getattr(client, 'direct_put', False):
+                return client.put_verified(source, key, digest, mime)
             client.put(source, key, digest, mime)
         remote = client.head(key)
         if not remote_matches(remote, source.stat().st_size, digest, composite):
             raise VaultError('integrity', 'S3のサイズ・SHA-256照合に失敗しました。', 409)
         return remote
 
+    @timed_stage('file_workers')
     def parallel_items(self, plan, work):
         """Overlap small-file preparation, transfer and previews; bound large staging."""
         self._progress_workers = getattr(self, '_progress_workers', {})
+        self._progress_plans[plan['id']] = plan
         self._progress_workers[plan['id']] = {}
         self._transfer_started = getattr(self, '_transfer_started', {})
         self._transfer_baseline = getattr(self, '_transfer_baseline', {})
@@ -724,7 +782,7 @@ class FolderUploads:
 
     def clear_progress(self, plan_id):
         self.live.pop(plan_id, None)
-        for field in ('_progress_workers', '_transfer_started', '_transfer_baseline'):
+        for field in ('_progress_workers', '_transfer_started', '_transfer_baseline', '_progress_plans'):
             getattr(self, field, {}).pop(plan_id, None)
 
     def start(self, plan_id, body):
@@ -809,17 +867,35 @@ class FolderUploads:
         if self.read(plan_id).get('trash'):
             raise VaultError('conflict', 'ごみ箱を管理した送信記録は再送信できません。新しく確認してください。', 409)
         plan = self.read(plan_id)
+        metrics = UploadPerformance()
+        self._performance[plan_id] = metrics
+        baseline = {i['id'] for i in plan['items'] if i['state'] == 'verified'}
+        client = None
+        first_attempt = plan.get('freshUpload', False)
         try:
+            plan['freshUpload'] = False
+            self.save(plan)
             client = self.client_factory(plan['bucket'], plan['profile'], plan['region'])
-            client.verify_private()
+            if type(client) is S3CLI:
+                from .s3_pooled import S3Pooled
+                client = S3Pooled(client.bucket, client.profile, client.region, client.recorder)
+            if isinstance(client, S3CLI):
+                client.performance = metrics
+            with metrics.measure('security_check'):
+                client.verify_private()
             from .upload_duplicates import prepare
-            prepare(self, plan, client)
+            with metrics.measure('duplicate_check'):
+                prepare(self, plan, client)
             if plan.get('noCatalog'):
                 plan['state'] = 'complete'; plan.setdefault('completedAt', time.time())
                 return
             def work(item):
                 expected = base64.b64encode(bytes.fromhex(item['sha256'])).decode()
-                remote = client.head(item['objectKey'])
+                # On first attempts a checked conditional PUT avoids HEAD. On
+                # resume, or with a missing source, reconcile existing S3 first.
+                direct = (getattr(client, 'direct_put', False) and first_attempt
+                          and item['byteSize'] < MULTIPART_THRESHOLD)
+                remote = None if direct else client.head(item['objectKey'])
                 if remote is None:
                     if shutil.disk_usage(self.root).free < item['byteSize'] + 128 * 1024 ** 2:
                         raise VaultError('storage_error', '送信用一時コピーの空き容量が不足しています。', 507)
@@ -833,7 +909,8 @@ class FolderUploads:
                         remote = self.send_file(client, plan, item, snapshot, item['objectKey'], expected, item['mimeType'], composite)
                         item['versionId'] = remote.get('VersionId')
                         self.report(plan_id, item, 'thumbnail')
-                        self.ensure_thumbnail(client, plan, item, snapshot)
+                        with metrics.measure('thumbnail_total'):
+                            self.ensure_thumbnail(client, plan, item, snapshot)
                 else:
                     if '-' in remote.get('ChecksumSHA256', '') and not item.get('multipartSHA256'):
                         # Old plans predate composite hashes. Reconcile our journal after a crash,
@@ -852,29 +929,31 @@ class FolderUploads:
                         raise VaultError('integrity', 'S3原本のサイズ・SHA-256照合に失敗しました。', 409)
                     item['versionId'] = remote.get('VersionId')
                     self.report(plan_id, item, 'thumbnail')
-                    self.ensure_thumbnail(client, plan, item)
+                    with metrics.measure('thumbnail_total'):
+                        self.ensure_thumbnail(client, plan, item)
             if not self.parallel_items(plan, work):
                 plan['state'] = 'paused'
             else:
                 self.live[plan_id] = {'phase': 'catalog', 'name': '', 'bytes': plan['byteSize'], 'totalBytes': plan['byteSize'], 'remainingSeconds': None, 'activeFiles': 0}
-                # Immutable folder snapshot: filenames and parent IDs are metadata only.
-                plan.setdefault('catalogCreatedAt', time.time())
-                manifest = {'schemaVersion': 1, 'id': plan['id'], 'rootId': plan['rootId'], 'name': plan['name'], 'catalogCreatedAt': plan['catalogCreatedAt'],
-                            'folders': plan['folders'], 'items': [{k: i.get(k) for k in
-                                ('id', 'name', 'folderId', 'byteSize', 'sha256', 'objectKey', 'mimeType', 'versionId', 'thumbnailKey')} for i in plan['items']]}
-                manifest_path = self.path(plan_id).parent / 'catalog.json'
-                atomic_json(manifest_path, manifest)
-                if manifest_path.stat().st_size > MAX_CATALOG_BYTES:
-                    raise VaultError('too_large', 'フォルダ管理情報が大きすぎます。小さいフォルダ単位で送信してください。', 413)
-                digest = base64.b64encode(hashlib.sha256(manifest_path.read_bytes()).digest()).decode()
-                key = f'media-hub/catalogs/{plan["rootId"]}/{plan_id}.json'
-                remote = client.head(key)
-                if remote is None:
-                    client.put(manifest_path, key, digest, 'application/json')
+                with metrics.measure('catalog_finalize'):
+                    # Immutable folder snapshot: filenames and parent IDs are metadata only.
+                    plan.setdefault('catalogCreatedAt', time.time())
+                    manifest = {'schemaVersion': 1, 'id': plan['id'], 'rootId': plan['rootId'], 'name': plan['name'], 'catalogCreatedAt': plan['catalogCreatedAt'],
+                                'folders': plan['folders'], 'items': [{k: i.get(k) for k in
+                                    ('id', 'name', 'folderId', 'byteSize', 'sha256', 'objectKey', 'mimeType', 'versionId', 'thumbnailKey')} for i in plan['items']]}
+                    manifest_path = self.path(plan_id).parent / 'catalog.json'
+                    atomic_json(manifest_path, manifest)
+                    if manifest_path.stat().st_size > MAX_CATALOG_BYTES:
+                        raise VaultError('too_large', 'フォルダ管理情報が大きすぎます。小さいフォルダ単位で送信してください。', 413)
+                    digest = base64.b64encode(hashlib.sha256(manifest_path.read_bytes()).digest()).decode()
+                    key = f'media-hub/catalogs/{plan["rootId"]}/{plan_id}.json'
                     remote = client.head(key)
-                if not remote or remote.get('ChecksumSHA256') != digest or remote.get('ContentLength') != manifest_path.stat().st_size:
-                    raise VaultError('integrity', 'フォルダ管理情報の照合に失敗しました。', 409)
-                plan['state'] = 'complete'; plan.setdefault('completedAt', time.time())
+                    if remote is None:
+                        client.put(manifest_path, key, digest, 'application/json')
+                        remote = client.head(key)
+                    if not remote or remote.get('ChecksumSHA256') != digest or remote.get('ContentLength') != manifest_path.stat().st_size:
+                        raise VaultError('integrity', 'フォルダ管理情報の照合に失敗しました。', 409)
+                    plan['state'] = 'complete'; plan.setdefault('completedAt', time.time())
         except TransferPaused:
             plan['state'] = 'paused'
         except Exception as exc:
@@ -888,3 +967,17 @@ class FolderUploads:
                 finally:
                     self.running.discard(plan_id)
                     self.clear_progress(plan_id)
+                    self._performance.pop(plan_id, None)
+                    if isinstance(client, S3CLI):
+                        client.performance = None
+                    if getattr(client, 'close', None):
+                        try:
+                            client.close()
+                        except Exception:
+                            pass  # A closed transport cannot change a committed result.
+                    result = metrics.result()
+                    completed = [i for i in plan['items'] if i['state'] == 'verified' and i['id'] not in baseline and not i.get('retained')]
+                    result.update(state=plan['state'], completedItems=len(completed),
+                                  completedSourceBytes=sum(i['byteSize'] for i in completed),
+                                  duplicateCount=plan.get('duplicateCount', 0))
+                    self.save_performance(plan_id, 'upload-performance.json', result)

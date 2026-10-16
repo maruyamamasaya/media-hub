@@ -112,3 +112,17 @@ S3ごみ箱は `local-api/tests/test_cloud_trash.py` と `backend/tests/test_rea
 16MiB管理情報はCatalogPreflightTestsとReaderTestsで上限ちょうど／1バイト超・1万件の見積もり・認可後断片と応答サイズ・途中変更を確認する。CatalogTransferTestsは最大サイズの復元・順序／破損拒否・暗号化16断片を確認し、EncryptedUploadTestsは実helperで最大316バイトの暗号化付加分と重複検査を検証する。iOS統合テストは16MiBの16回取得と最終SHA-256不一致時のキャッシュ拒否を確認する。
 
 Mac UI第1段はTrashBatchTestsで確認対象の固定・逐次処理・途中失敗／再ロック後の後続削除停止を検証。FolderUploadTestsで完了日時の成功時記録・失敗時欠落・旧履歴の非補完・契約互換を確認。費用画面は共有SwiftUIのためMacとiOSをビルドする。複数選択・確認取消・期間切替・実画面の視認性は手動確認を別途行う。
+
+共有お気に入りはbackend FavoritesTestsで本人限定・対象認可・PIN前の非表示／操作拒否・ごみ箱／復元・壊れた保存の上書き拒否・ETag競合の再読込／上限を確認。SharedFavoriteBridgeTestsでMac bridge書込→iPhoneと同じ共有モジュールの読取→解除→Mac反映を隔離S3で検証。ThumbnailCacheTestsで上限・改ざん・削除後の古い取得による再生成防止、CachedMediaTestsで再取得削減・削除・ごみ箱・毎回のPIN認可を確認。Swift LibraryStateTestsは普通の切替で画面識別と一覧を保持し、再ロックで保護された子孫だけ除去することを確認。iOS統合は2クライアントの星の共有と保存失敗時の星の保持を確認する。
+
+iPhoneページ送りの統合テストは完了前の現在ページ維持・取消時のページ同一性・境界・近傍ページの破棄・初期選択位置・拡大中だけの画像パンを確認する。合成画像で横／縦の実ドラッグと短いドラッグの取消をシミュレータで別途確認する。実機での指の速度・ピンチの感触は本人確認を残す。
+
+実タッチの再現手順は[MediaPagerUI](Tests/MediaPagerUI/README.md)。iOS統合の `testForegroundJoinsPrefetchAndSurvivesPrefetchCancellation` で先読みと表示の通信が1回にまとまり、先読みだけの取消では表示が失敗しないことを確認する。
+
+通常アップロード計測は `local-api/tests/test_upload_performance.py` で並列集計・失敗の伝播・S3要求本文bytes・秘密情報非記録・成功／失敗／再開での記録・診断保存失敗時の転送結果保持・進捗表示の履歴再読取削減と停止確認維持を検証する。実素材のローカル準備計測と実S3の読取時間は転送全体の改善率と区別する。[計測仕様](docs/UPLOAD-IMPROVEMENTS.md#通常送信の工程別計測)。
+
+通常画像の先読みは統合テストで各画像の準備直後の通知、ディスクだけの隣ページ復元（無効な接続設定でも成功）、ロック後の隣ページ拒否を検証する。実機の初回通信時間・体感速度は別途確認する。
+
+S3接続再利用は `local-api/tests/test_s3_pooled.py` で条件付きPUTと暗号化指定、版付きSHA-256応答でのHEAD省略、応答不足時のHEAD、競合時の内容照合、不一致拒否、404・認証・multipart期限切れ、版固定GETとストリームclose、multipart引数、新規／再開の原本確認の違いを検証する。実AWSでは非公開設定の読取と本人承認した通常送信を別途確認する。
+
+暗号化写真の先読みはiOS統合で合成AES-GCM写真のメモリ復号→表示合流（取得1回）、非アクティブな隣ページの実表示と閉じた後の描画除去、SHA不一致、権限失効／閉じた後の遅延結果拒否、遠いページの除去、4096px展開、Wi-Fi／従量／省データ判定、暗号文付加分を含む50MiB予約と重複・動画・PDF・5MiB超拒否を確認する。実回線の体感・実請求との照合は別途必要。

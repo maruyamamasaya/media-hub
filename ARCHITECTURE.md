@@ -7,6 +7,8 @@
 
 個人向けiOS写真管理。SwiftUI / PhotoKit / ImageIO / CryptoKit / OS標準SQLite3、iOS 17以上。追加のSwift依存なし。共有ロジックはSwift Package。開発用保存はアプリ内ファイル。本番向けPython Lambda / S3 / Cognito / HTTP APIのコードとテンプレートは存在するが未デプロイ。
 
+Macの通常小画像は認可・SHA-256確認後に256MiBのローカルキャッシュを利用し、設定から削除可能。原本・暗号化の復号内容は対象外。共有お気に入りは `backend/favorites.py` のETag比較更新をMacのCLI bridgeとiPhoneの本人APIから利用し、S3の正確な1キーのみ書込を許可。[仕様と競合制御](docs/SHARED-FAVORITES.md)。
+
 ## Directory Structure / Main Components
 ```text
 photo-hub/
@@ -28,10 +30,10 @@ photo-hub/
 
 ## Data Flow
 
-Macの通常／暗号化送信は4件並列の非同期照合 → 最初の確認済みフォルダ送信と次の1フォルダ準備を重ねる → 最大4件並列（大容量は単独） → 条件付きPUT／再開可能multipart → 管理情報確定。後続送信は前フォルダの保存完了後だけ開始する。暗号文だけの再開用保持と照合は[アップロード改善](docs/UPLOAD-IMPROVEMENTS.md)。
+Macの通常／暗号化送信は4件並列の非同期照合 → 最初の確認済みフォルダ送信と次の1フォルダ準備を重ねる → 最大4件並列（大容量は単独） → 通常送信のSDK接続プール・条件付きPUT／再開可能multipart → 管理情報確定。後続送信は前フォルダの保存完了後だけ開始する。暗号文だけの再開用保持と照合は[アップロード改善](docs/UPLOAD-IMPROVEMENTS.md)。
 暗号化用は独立したEncryptedUploads → 同梱MediaHubCrypto（CryptoKit・鍵はstdinのみ） → encrypted-objects／encrypted-catalogsの非公開S3 → 本人限定GET URL → 共通SealedRangeReader／AVAssetResourceLoaderで必要断片をメモリ復号。鍵はKeychain、復旧ファイルはPBKDF2＋AES-GCM。[暗号化構成](docs/ENCRYPTED-UPLOAD.md)。
 
-現行S3閲覧: Macの確認済み入力 → 原本と最大50KBのサムネイルを非公開S3へ → カタログ登録 → Macの認証付きローカルAPI／iPhoneの本人・フォルダ認可＋5分署名GET → 表示メモリ。Macの転送用ファイルは応答完了、原本表示用ファイルは閲覧終了で破棄し、長期閲覧キャッシュは作成しない。[小画像保管方針](decisions/0015-private-thumbnails-no-durable-cache.md)。
+現行S3閲覧: Macの確認済み入力 → 原本と最大50KBのサムネイルを非公開S3へ → カタログ登録 → Macの認証付きローカルAPI／iPhoneの本人・フォルダ認可＋5分署名GET → 表示メモリ。Macの転送用ファイルは応答完了、原本表示用ファイルは閲覧終了で破棄し、原本の長期閲覧キャッシュは作成しない。通常小画像は上記256MiBキャッシュを利用。[現行方針](decisions/0025-mac-cache-and-shared-favorites.md)。
 
 Web: ファイル選択/テストフォルダ → ImportJob/Itemとstaging → 原本照合 → Asset/File登録 → 派生生成。Browser → API → SQLiteの検索/整理 → StorageのFile IDによる画像配信。派生失敗でも原本を保持する。削除はごみ箱から完全削除、deletingを起動時に再試行する。
 
@@ -48,7 +50,7 @@ SQLite → LazyVGrid / 詳細 → 派生キャッシュ → 必要時GET
 SQLite → JSON正常版 + latestポインター → 空SQLiteへの復元
 ```
 
-iOS通常閲覧はCloudViewerModel → メモリ／ReaderImageDiskStore専用actorの最大1GBキャッシュ → 未取得サムネイルの最大60件一括署名 → 非公開S3。署名要求と同一画像の同時取得を共有し、ディスク／原本照合をUIから分離する。暗号化内容はメモリのみ。[キャッシュと一括署名](docs/S3-READER.md)。
+iPhoneの横／縦送りと画像拡大は共通の `ios/PhotoHub/MediaPager.swift`（UIPageViewController＋UIScrollView）で操作中の表示を保持する。iOS通常閲覧はCloudViewerModel → メモリ／ReaderImageDiskStore専用actorの最大1GBキャッシュ → 未取得サムネイルの最大60件一括署名 → 非公開S3。署名要求と同一画像の同時取得を共有し、ディスク／原本照合をUIから分離する。暗号化写真は画面単位のPhoneSealedImageSessionで取得・復号を共有し、Wi-Fi時の次1枚と現在／隣ページだけを容量内のメモリに保持する。[キャッシュと一括署名](docs/S3-READER.md)。
 
 PDFは共通`MediaPDFReader`（PDFKit）でMac／iPhoneに表示する。通常・暗号化の既存送信経路を使い、Mac同梱helperで先頭ページの小画像を作る。暗号化PDFの閲覧はメモリ復号のみ。[PDF仕様](docs/PDF-SUPPORT.md)。
 

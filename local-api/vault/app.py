@@ -220,6 +220,24 @@ def create_app(data_root=None, fixtures=None, *, desktop_token=None, desktop_ori
         trash.sync_library()
         return privacy.library(folder_grant(request)) if privacy_enabled else folder_uploads.library()
 
+    @app.post('/api/v1/folder-library/favorites')
+    def read_shared_favorites(body: dict, request: Request):
+        from .shared_favorites import execute
+        return execute(folder_uploads, body, folder_grant(request))
+
+    @app.post('/api/v1/folder-library/favorites/set')
+    def set_shared_favorite(body: dict, request: Request):
+        from .shared_favorites import execute
+        return execute(folder_uploads, body, folder_grant(request), write=True)
+
+    @app.get('/api/v1/folder-library/cache')
+    def thumbnail_cache_stats():
+        return folder_uploads.thumbnail_cache.stats()
+
+    @app.post('/api/v1/folder-library/cache/clear')
+    def thumbnail_cache_clear():
+        return folder_uploads.thumbnail_cache.clear()
+
     @app.get('/api/v1/folder-library/trash')
     def folder_trash(request: Request):
         return trash.entries(folder_grant(request), privacy if privacy_enabled else None)

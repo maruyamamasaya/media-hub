@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 import UIKit
 import PDFKit
@@ -10,6 +11,245 @@ import CryptoKit
 
 @MainActor
 final class IntegrationTests: XCTestCase {
+    private func sealedPhotoFixture(_ bytes: Data, size: Int64? = nil, mime: String = "image/png", digest: String? = nil) throws -> SealedItem {
+        try JSONDecoder().decode(SealedItem.self, from: JSONSerialization.data(withJSONObject: [
+            "id": UUID().uuidString, "name": "Synthetic", "folderId": UUID().uuidString,
+            "mimeType": mime, "byteSize": size ?? Int64(bytes.count),
+            "sha256": digest ?? SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(),
+            "objectID": UUID().uuidString
+        ]))
+    }
+    func testSealedPhotoMemoryPrefetchJoinsForegroundAndDecryptsWithoutDisk() async throws {
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        let bytes = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 30, height: 20), format: format).image { UIColor.blue.setFill(); $0.fill(CGRect(x: 0, y: 0, width: 30, height: 20)) }.pngData())
+        let item = try sealedPhotoFixture(bytes), current = UUID().uuidString
+        let master = Data(repeating: 0x37, count: 32)
+        let header = try SealedMedia.header(length: item.byteSize, objectID: item.objectID)
+        let cipher = header.data + (try SealedMedia.sealChunk(bytes, index: 0, header: header, master: master))
+        let session = PhoneSealedImageSession(monitorNetwork: false)
+        session.select(current: current, next: item.objectID, previous: nil)
+        var downloads = 0
+        let started = expectation(description: "Prefetch started")
+        let load: () async throws -> Data = {
+            downloads += 1; started.fulfill()
+            try await Task.sleep(nanoseconds: 60_000_000)
+            let reader = SealedRangeReader(objectID: item.objectID, master: master, expectedLength: item.byteSize) { range in
+                cipher.subdata(in: Int(range.lowerBound)..<Int(range.upperBound))
+            }
+            let result = try await reader.allData(); await reader.close(); return result
+        }
+        let prefetch = Task { try await session.image(item, authorized: { true }, load: load) }
+        await fulfillment(of: [started], timeout: 2)
+        session.select(current: item.objectID, next: nil, previous: current)
+        prefetch.cancel()
+        let visible = try await session.image(item, authorized: { true }, load: load)
+        _ = try? await prefetch.value
+        XCTAssertEqual(downloads, 1, "Entering the prefetched page must not download/decrypt twice")
+        XCTAssertEqual(visible.size.width, 30)
+        XCTAssertNotNil(session.images[item.objectID])
+        _ = try await session.image(item, authorized: { true }) { XCTFail("Memory hit must not fetch again"); return bytes }
+        session.close()
+        XCTAssertTrue(session.images.isEmpty)
+        do { _ = try await session.image(item, authorized: { true }, load: load); XCTFail("Closed viewer cannot restore plaintext") } catch { }
+    }
+    func testInactiveSealedPageDisplaysMemoryPreviewAndReleasesItOnClose() async throws {
+        let bytes = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).image { _ in }.pngData())
+        let item = try sealedPhotoFixture(bytes)
+        let root = try JSONDecoder().decode(SealedRoot.self, from: JSONSerialization.data(withJSONObject: ["id": UUID().uuidString, "keyID": UUID().uuidString, "cipherBytes": 1]))
+        let secret = try MediaSecret(masterKey: Data(repeating: 0x12, count: 32))
+        let session = PhoneSealedImageSession(monitorNetwork: false)
+        session.select(current: UUID().uuidString, next: item.objectID, previous: nil)
+        _ = try await session.image(item, authorized: { true }) { bytes }
+        let model = CloudViewerModel()
+        let page = PhoneSealedMedia(root: root, item: item, secret: secret, photos: session,
+            controls: .constant(true), active: false, onZoom: { _ in }).environmentObject(model)
+        let host = UIHostingController(rootView: page)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let old = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene); window.rootViewController = host; window.makeKeyAndVisible()
+        defer { session.close(); window.isHidden = true; old?.makeKey() }
+        func hasImage(_ view: UIView) -> Bool {
+            view.accessibilityIdentifier == "media-image-zoom" || view.subviews.contains { hasImage($0) }
+        }
+        for _ in 0..<20 { host.view.layoutIfNeeded(); if hasImage(host.view) { break }; try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(hasImage(host.view), "The incoming page must show its prepared photo before becoming active")
+        session.close()
+        for _ in 0..<20 { host.view.layoutIfNeeded(); if !hasImage(host.view) { break }; try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertFalse(hasImage(host.view), "Clearing the shared session must also remove the hosted image")
+    }
+
+    func testSealedPhotoRejectsCorruptionRevocationAndLateCompletion() async throws {
+        let bytes = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 4, height: 4)).image { _ in }.pngData())
+        let broken = try sealedPhotoFixture(bytes, digest: String(repeating: "0", count: 64))
+        let session = PhoneSealedImageSession(monitorNetwork: false)
+        session.select(current: broken.objectID, next: nil, previous: nil)
+        do { _ = try await session.image(broken, authorized: { true }) { bytes }; XCTFail("Corrupt photo must fail") } catch { }
+        XCTAssertTrue(session.images.isEmpty)
+        let item = try sealedPhotoFixture(bytes)
+        session.select(current: item.objectID, next: nil, previous: broken.objectID)
+        var authorized = true
+        let started = expectation(description: "Download in progress")
+        var finish: CheckedContinuation<Data, Never>?
+        let pending = Task {
+            try await session.image(item, authorized: { authorized }) {
+                await withCheckedContinuation { finish = $0; started.fulfill() }
+            }
+        }
+        await fulfillment(of: [started], timeout: 2)
+        authorized = false; session.close(); finish?.resume(returning: bytes)
+        do { _ = try await pending.value; XCTFail("Late download must not repopulate a closed/relocked viewer") } catch { }
+        XCTAssertTrue(session.images.isEmpty)
+        XCTAssertTrue(session.errors.isEmpty)
+    }
+    func testSealedPrefetchPolicyAndCiphertextBudget() throws {
+        XCTAssertTrue(PhoneSealedImageSession.allowsPrefetch(satisfied: true, wifi: true, wired: false, expensive: false, constrained: false))
+        for policy in [(false, true, false, false, false), (true, false, false, false, false), (true, true, false, true, false), (true, true, false, false, true)] {
+            XCTAssertFalse(PhoneSealedImageSession.allowsPrefetch(satisfied: policy.0, wifi: policy.1, wired: policy.2, expensive: policy.3, constrained: policy.4))
+        }
+        let model = CloudViewerModel()
+        model.signedIn = true; model.hiddenPagesOpen = true
+        let root = try JSONDecoder().decode(SealedRoot.self, from: JSONSerialization.data(withJSONObject: ["id": UUID().uuidString, "keyID": UUID().uuidString, "cipherBytes": 1]))
+        let mib: Int64 = 1024 * 1024
+        let first = try sealedPhotoFixture(Data(), size: 5 * mib)
+        XCTAssertTrue(model.reserveSealedPhotoPrefetch(root, item: first))
+        XCTAssertFalse(model.reserveSealedPhotoPrefetch(root, item: first), "Attempted photos are never automatically retried")
+        for _ in 0..<8 { XCTAssertTrue(model.reserveSealedPhotoPrefetch(root, item: try sealedPhotoFixture(Data(), size: 5 * mib))) }
+        XCTAssertFalse(model.reserveSealedPhotoPrefetch(root, item: try sealedPhotoFixture(Data(), size: 5 * mib)), "Cipher header/tags count toward 50MiB")
+        XCTAssertFalse(model.reserveSealedPhotoPrefetch(root, item: try sealedPhotoFixture(Data(), size: 5 * mib + 1)))
+        XCTAssertFalse(model.reserveSealedPhotoPrefetch(root, item: try sealedPhotoFixture(Data(), size: 1, mime: "video/mp4")))
+        XCTAssertFalse(model.reserveSealedPhotoPrefetch(root, item: try sealedPhotoFixture(Data(), size: 1, mime: "application/pdf")))
+        model.relock()
+        XCTAssertFalse(model.reserveSealedPhotoPrefetch(root, item: try sealedPhotoFixture(Data(), size: 1)))
+        model.signedIn = true; model.hiddenPagesOpen = true
+        XCTAssertTrue(model.reserveSealedPhotoPrefetch(root, item: first), "Relocking starts a new bounded unlock session")
+    }
+    func testSealedPhotoBoundsDecodedPixelsAndEvictsDistantPages() async throws {
+        let format = UIGraphicsImageRendererFormat(); format.scale = 1
+        let bytes = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 4200, height: 10), format: format).image { _ in }.pngData())
+        let first = try sealedPhotoFixture(bytes), second = try sealedPhotoFixture(bytes), third = try sealedPhotoFixture(bytes)
+        let session = PhoneSealedImageSession(monitorNetwork: false)
+        session.select(current: first.objectID, next: second.objectID, previous: nil)
+        let decoded = try await session.image(first, authorized: { true }) { bytes }
+        XCTAssertLessThanOrEqual(try XCTUnwrap(decoded.cgImage).width, 4096)
+        _ = try await session.image(second, authorized: { true }) { bytes }
+        session.select(current: third.objectID, next: nil, previous: second.objectID)
+        XCTAssertNil(session.images[first.objectID])
+        XCTAssertNotNil(session.images[second.objectID])
+        let used = session.images.values.reduce(0) { $0 + ($1.cgImage.map { $0.bytesPerRow * $0.height } ?? 0) }
+        XCTAssertLessThanOrEqual(used, PhoneSealedImageSession.maximumMemoryBytes)
+        session.close()
+    }
+
+    func testForegroundJoinsPrefetchAndSurvivesPrefetchCancellation() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ReaderBatchProtocol.self]
+        let auth = Authentication(network: URLSession(configuration: configuration), storage: FixtureRefreshTokens())
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory); ReaderBatchProtocol.imageDelay = 0 }
+        let model = CloudViewerModel(cacheRoot: directory, authentication: auth, networkConfiguration: configuration)
+        model.configuration.api = "https://fixture.invalid"; model.configuration.domain = "https://fixture.invalid"
+        model.configuration.clientID = "test-client"; model.configuration.owner = UUID().uuidString; model.signedIn = true
+        let bytes = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 10, height: 10)).image { UIColor.red.setFill(); $0.fill(CGRect(x: 0, y: 0, width: 10, height: 10)) }.pngData())
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        ReaderBatchProtocol.imageData = bytes; ReaderBatchProtocol.imageCount = 0; ReaderBatchProtocol.imageDelay = 0.2
+        let catalog = try JSONDecoder().decode(ReadCatalog.self, from: JSONSerialization.data(withJSONObject: [
+            "id": "catalog", "rootId": "root", "name": "Test",
+            "folders": [["id": "folder", "name": "Folder", "parentId": NSNull(), "isLocked": false]],
+            "items": ["one", "two"].map { ["id": $0, "name": "Image", "folderId": "folder", "sha256": digest, "mimeType": "image/png", "byteSize": bytes.count, "hasThumbnail": true] as [String: Any] }
+        ]))
+        model.catalogs[model.catalogKey("root", "catalog")] = catalog
+        let entries = catalog.items.map { ReaderEntry(catalog: catalog, item: $0) }
+        let prefetch = Task { await model.prefetchSwipeImages(entries, after: 0) }
+        try await Task.sleep(nanoseconds: 80_000_000)
+        let foreground = Task { try await model.image(catalog, catalog.items[1]) }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        prefetch.cancel()
+        let image = try await foreground.value
+        await prefetch.value
+        XCTAssertEqual(image.size, try XCTUnwrap(UIImage(data: bytes)).size)
+        XCTAssertEqual(ReaderBatchProtocol.imageCount, 1, "Swiping into an in-flight prefetch must reuse its download")
+        XCTAssertNotNil(model.pagingPreview(catalog, catalog.items[1]))
+        model.relock()
+        XCTAssertNil(model.pagingPreview(catalog, catalog.items[1]))
+    }
+
+    func testNativePagerCommitsOnlyCompletedTransitionsAndKeepsCurrentPageOnCancellation() throws {
+        var selected = 0
+        let binding = Binding(get: { selected }, set: { selected = $0 })
+        let pager = NativeMediaPager(count: 4, selection: binding) { index, active in Text("\(index)/\(active)") }
+        let coordinator = pager.makeCoordinator()
+        let controller = UIPageViewController(transitionStyle: .scroll, navigationOrientation: .horizontal)
+        coordinator.controller = controller
+        let first = try XCTUnwrap(coordinator.page(0)), next = try XCTUnwrap(coordinator.page(1))
+        controller.setViewControllers([first], direction: .forward, animated: false)
+        coordinator.pageViewController(controller, willTransitionTo: [next])
+        XCTAssertEqual(selected, 0)
+        XCTAssertEqual(coordinator.activeIndex, 0, "The outgoing media must stay active while dragging")
+        coordinator.pageViewController(controller, didFinishAnimating: true, previousViewControllers: [next], transitionCompleted: false)
+        XCTAssertEqual(selected, 0)
+        XCTAssertTrue(coordinator.page(0) === first, "Cancelled drags must keep the same loaded page")
+        controller.setViewControllers([next], direction: .forward, animated: false)
+        coordinator.pageViewController(controller, didFinishAnimating: true, previousViewControllers: [first], transitionCompleted: true)
+        XCTAssertEqual(selected, 1)
+        XCTAssertEqual(coordinator.activeIndex, 1)
+        XCTAssertNil(coordinator.page(-1)); XCTAssertNil(coordinator.page(4))
+        _ = coordinator.page(3)
+        coordinator.trim(around: 1)
+        XCTAssertTrue(coordinator.pages.keys.allSatisfy { abs($0 - 1) <= 1 })
+    }
+
+    func testNativePagerStartsAtSelectedMediaAndZoomOnlyEnablesImagePanWhenEnlarged() throws {
+        let pager = NativeMediaPager(count: 5, selection: .constant(3), vertical: true) { index, _ in Text("\(index)") }
+        XCTAssertEqual(pager.makeCoordinator().activeIndex, 3)
+        var zoomStates: [Bool] = []
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 10, height: 10)).image { $0.cgContext.fill(CGRect(x: 0, y: 0, width: 10, height: 10)) }
+        let zoom = PhoneZoomableImage(image: image, onTap: {}, onZoomChanged: { zoomStates.append($0) })
+        let coordinator = zoom.makeCoordinator()
+        let scroll = PhoneImageScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 600))
+        scroll.minimumZoomScale = 1; scroll.maximumZoomScale = 6
+        scroll.imageView.image = image; scroll.addSubview(scroll.imageView); scroll.delegate = coordinator
+        scroll.layoutIfNeeded(); zoomStates = []
+        coordinator.scrollViewWillBeginZooming(scroll, with: scroll.imageView)
+        scroll.setZoomScale(3, animated: false)
+        coordinator.scrollViewDidEndZooming(scroll, with: scroll.imageView, atScale: 3)
+        scroll.setZoomScale(1, animated: false)
+        coordinator.scrollViewDidEndZooming(scroll, with: scroll.imageView, atScale: 1)
+        XCTAssertFalse(scroll.gestureRecognizerShouldBegin(scroll.panGestureRecognizer))
+        XCTAssertTrue(zoomStates.contains(true))
+        XCTAssertEqual(zoomStates.last, false)
+    }
+
+    func testFavoritesShareBetweenDevicesAndFailedWriteDoesNotChangeStar() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FavoriteProtocol.self]
+        FavoriteProtocol.entries = []; FavoriteProtocol.failWrite = false
+        func device() -> CloudViewerModel {
+            let auth = Authentication(network: URLSession(configuration: configuration), storage: FixtureRefreshTokens())
+            let model = CloudViewerModel(authentication: auth, networkConfiguration: configuration)
+            model.configuration.api = "https://fixture.invalid"; model.configuration.domain = "https://fixture.invalid"
+            model.configuration.clientID = "test-client"; model.configuration.owner = UUID().uuidString
+            model.signedIn = true
+            return model
+        }
+        let mac = device(), phone = device()
+        let ref = FavoriteReference(root: UUID().uuidString, catalog: UUID().uuidString, target: UUID().uuidString, kind: "item")
+        await mac.toggleFavorite(ref)
+        XCTAssertTrue(mac.isFavorite(ref))
+        await phone.refreshFavorites()
+        XCTAssertTrue(phone.isFavorite(ref))
+        FavoriteProtocol.failWrite = true
+        await phone.toggleFavorite(ref)
+        XCTAssertTrue(phone.isFavorite(ref))
+        XCTAssertFalse(phone.favoriteError.isEmpty)
+        FavoriteProtocol.failWrite = false
+        await phone.toggleFavorite(ref)
+        await mac.refreshFavorites()
+        XCTAssertFalse(mac.isFavorite(ref))
+        phone.favorites = [ref]
+        phone.relock()
+        XCTAssertTrue(phone.favorites.isEmpty)
+    }
+
     func testSixteenMiBCatalogDownloadAndCorruptionRejection() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [ReaderBatchProtocol.self]
@@ -123,7 +363,12 @@ final class IntegrationTests: XCTestCase {
         cancelled.cancel()
         await cancelled.value
         XCTAssertEqual(ReaderBatchProtocol.imageCount, 0)
-        await model.prefetchSwipeImages(entries, after: 0)
+        var preparedCounts: [Int] = []
+        await model.prefetchSwipeImages(entries, after: 0) {
+            preparedCounts.append(ReaderBatchProtocol.imageCount)
+            XCTAssertNotNil(model.pagingPreview(catalog, catalog.items[preparedCounts.count * 2]))
+        }
+        XCTAssertEqual(preparedCounts, Array(1...10), "Publish every image before waiting for the remaining window")
         XCTAssertEqual(ReaderBatchProtocol.imageCount, 10, "Never download the entire queue")
         _ = try await model.image(catalog, catalog.items[2])
         await model.prefetchSwipeImages(entries, after: 0)
@@ -186,20 +431,19 @@ final class IntegrationTests: XCTestCase {
         scroll.imageView.image = image
         scroll.addSubview(scroll.imageView)
         scroll.minimumZoomScale = 1; scroll.maximumZoomScale = 6
-        let coordinator = PhoneZoomableImage.Coordinator(PhoneZoomableImage(image: image, onTap: {}, onSwipe: { _ in }))
+        let coordinator = PhoneZoomableImage.Coordinator(PhoneZoomableImage(image: image, onTap: {}))
         scroll.delegate = coordinator
         scroll.layoutIfNeeded()
         XCTAssertEqual(scroll.imageView.frame.width, 300, accuracy: 0.1)
         XCTAssertEqual(scroll.imageView.frame.height, 150, accuracy: 0.1)
         XCTAssertEqual(scroll.contentInset.top, 225, accuracy: 0.1)
-        let swipe = UISwipeGestureRecognizer()
-        scroll.addGestureRecognizer(swipe)
-        XCTAssertTrue(coordinator.gestureRecognizerShouldBegin(swipe))
+        coordinator.scrollViewDidZoom(scroll)
+        XCTAssertFalse(scroll.gestureRecognizerShouldBegin(scroll.panGestureRecognizer))
         scroll.setZoomScale(3, animated: false)
         XCTAssertEqual(scroll.imageView.frame.width, 900, accuracy: 0.1)
-        XCTAssertFalse(coordinator.gestureRecognizerShouldBegin(swipe))
+        XCTAssertTrue(scroll.gestureRecognizerShouldBegin(scroll.panGestureRecognizer))
         scroll.setZoomScale(1, animated: false)
-        XCTAssertTrue(coordinator.gestureRecognizerShouldBegin(swipe))
+        XCTAssertFalse(scroll.gestureRecognizerShouldBegin(scroll.panGestureRecognizer))
         scroll.frame.size = CGSize(width: 600, height: 300)
         scroll.setNeedsLayout(); scroll.layoutIfNeeded()
         XCTAssertEqual(scroll.imageView.frame.size, CGSize(width: 600, height: 300))
@@ -315,6 +559,8 @@ final class IntegrationTests: XCTestCase {
         try bytes.write(to: disk.file(id: key, kind: .display))
         let cached = try await model.catalog(root)
         XCTAssertEqual(cached.id, catalog.id)
+        let restoredPreview = await model.cachedPagingPreview(catalog, catalog.items[0])
+        XCTAssertNotNil(restoredPreview, "An inactive neighbor must restore disk cache without a network request")
         var statuses: [String] = []
         let image = try await model.image(catalog, catalog.items[0]) { statuses.append($0) }
         XCTAssertEqual(statuses, ["保存済みの画像を確認中…"], "Cached images must not report a network download")
@@ -324,6 +570,8 @@ final class IntegrationTests: XCTestCase {
         model.catalogs[model.catalogKey("root", "catalog")] = try JSONDecoder().decode(ReadCatalog.self, from: JSONSerialization.data(withJSONObject: lockedJSON))
         do { _ = try await model.image(catalog, catalog.items[0]); XCTFail("Locked folder must reject even a memory cache hit") }
         catch ViewerError.unlock { }
+        let lockedPreview = await model.cachedPagingPreview(catalog, catalog.items[0])
+        XCTAssertNil(lockedPreview, "Neighbor previews must enforce current folder access")
         model.relock()
         XCTAssertTrue(model.catalogs.isEmpty)
         do { _ = try await model.image(catalog, catalog.items[0]); XCTFail("Stale catalog must not authorize cached bytes") }
@@ -588,6 +836,7 @@ extension IntegrationTests {
 private final class ReaderBatchProtocol: URLProtocol {
     static var batchCount = 0
     static var imageCount = 0
+    static var imageDelay: TimeInterval = 0
     static var imageData = Data()
     static var catalogData: Data?
     static var catalogCount = 0
@@ -611,6 +860,7 @@ private final class ReaderBatchProtocol: URLProtocol {
                 "sha256": digest, "nextOffset": end < catalog.count ? end as Any : NSNull()])
         } else if request.url!.path.hasPrefix("/image/") {
             Self.imageCount += 1
+            if Self.imageDelay > 0 { Thread.sleep(forTimeInterval: Self.imageDelay) }
             data = Self.imageData
         } else if request.url!.path.contains("/items/") {
             let id = request.url!.deletingLastPathComponent().lastPathComponent
@@ -625,6 +875,39 @@ private final class ReaderBatchProtocol: URLProtocol {
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
         client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+private final class FavoriteProtocol: URLProtocol {
+    static var entries: [FavoriteReference] = []
+    static var failWrite = false
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        var status = 200
+        let data: Data
+        if request.url!.path.contains("oauth2/token") { data = Data(#"{"access_token":"test-only-access"}"#.utf8) }
+        else if request.httpMethod == "POST" {
+            if Self.failWrite { status = 502; data = Data("{}".utf8) }
+            else {
+                var body = request.httpBody
+                if body == nil, let stream = request.httpBodyStream {
+                    stream.open(); defer { stream.close() }
+                    var bytes = Data(), buffer = [UInt8](repeating: 0, count: 1024)
+                    while stream.hasBytesAvailable { let count = stream.read(&buffer, maxLength: buffer.count); if count <= 0 { break }; bytes.append(buffer, count: count) }
+                    body = bytes
+                }
+                let value = try! JSONSerialization.jsonObject(with: body!) as! [String: Any]
+                let ref = try! JSONDecoder().decode(FavoriteReference.self, from: JSONSerialization.data(withJSONObject: value["reference"]!))
+                Self.entries.removeAll { $0.identity == ref.identity }
+                if value["favorite"] as? Bool == true { Self.entries.append(ref) }
+                data = Data(#"{"saved":true}"#.utf8)
+            }
+        } else { data = try! JSONEncoder().encode(Self.entries) }
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data); client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
 }

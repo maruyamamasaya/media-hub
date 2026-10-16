@@ -50,6 +50,22 @@ Resources:
           BUCKET: !Ref BucketName
           OWNER_SUB: !Ref OwnerSub
       Events:
+        FavoritesRead:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /favorites
+            Method: GET
+            Auth:
+              AuthorizationScopes: [openid]
+        FavoritesWrite:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /favorites
+            Method: POST
+            Auth:
+              AuthorizationScopes: [openid]
         Usage:
           Type: HttpApi
           Properties:
@@ -145,6 +161,10 @@ Resources:
                   - !Sub 'arn:aws:s3:::${BucketName}/media-hub/encrypted-objects/*'
                   - !Sub 'arn:aws:s3:::${BucketName}/media-hub/folder-locks/settings.json'
                   - !Sub 'arn:aws:s3:::${BucketName}/media-hub/usage/latest.json'
+                  - !Sub 'arn:aws:s3:::${BucketName}/media-hub/favorites/state.json'
+              - Effect: Allow
+                Action: ['s3:PutObject']
+                Resource: !Sub 'arn:aws:s3:::${BucketName}/media-hub/favorites/state.json'
               - Effect: Allow
                 Action: ['logs:CreateLogStream', 'logs:PutLogEvents']
                 Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-reader:*'

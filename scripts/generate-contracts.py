@@ -29,6 +29,10 @@ def generated():
             ts.append(f'  {key}{"?" if optional else ""}: {type_name(prop)};')
             swift_type = type_name(prop, True)
             sw.append(f'    public let {key}: {swift_type}{"?" if optional and not swift_type.endswith("?") else ""}')
+        if name == 'FavoriteReference':
+            sw.append('    public init(space: String, rootId: String, catalogId: String, targetId: String, kind: String) {')
+            sw.append('        self.space = space; self.rootId = rootId; self.catalogId = catalogId; self.targetId = targetId; self.kind = kind')
+            sw.append('    }')
         sw.append('    private enum CodingKeys: String, CodingKey {')
         sw.append('        case ' + ', '.join(model['properties']))
         sw.append('    }')

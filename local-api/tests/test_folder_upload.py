@@ -310,7 +310,7 @@ class CloudLibraryTests(unittest.TestCase):
         library = self.service.library()
         self.assertEqual([p['id'] for p in library], [saved['id']])
 
-    def test_original_and_thumbnail_always_use_s3(self):
+    def test_original_uses_s3_and_verified_thumbnail_is_reused(self):
         plan = self.make_saved()
         item = next(i for i in plan['items'] if i['name'] == 'image.png')
         (self.source / 'Trip' / 'image.png').write_bytes(b'changed-local-original')
@@ -323,7 +323,7 @@ class CloudLibraryTests(unittest.TestCase):
             path, _, _ = self.service.media(plan['id'], item['id'], thumbnail)
             self.service.release_media(path)
             self.assertFalse(path.exists())
-        self.assertEqual([c[0] for c in calls], [item['thumbnailKey'], item['objectKey'], item['thumbnailKey']])
+        self.assertEqual([c[0] for c in calls], [item['thumbnailKey'], item['objectKey']])
         self.assertEqual((self.source / 'Trip' / 'image.png').read_bytes(), b'changed-local-original')
         self.assertFalse((self.service.root / 'view-cache').exists())
 

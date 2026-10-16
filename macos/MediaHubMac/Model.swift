@@ -41,6 +41,35 @@ final class MacModel: ObservableObject {
     private var unlockTimer: Task<Void, Never>?
     init(runtime: MacRuntime) { self.runtime = runtime; encryptionReady = (try? MediaSecretStore.load()) != nil }
     var usageScope: String { bucket + "|" + profile + "|" + region }
+    @Published var favorites: [FavoriteReference] = []
+    @Published var favoriteError = ""
+    @Published var favoriteBusy = false
+    func favorite(_ plan: FolderUpload, target: String, kind: String) -> FavoriteReference {
+        FavoriteReference(root: plan.rootId ?? plan.folders.first(where: { $0.parentId == nil })?.id ?? "", catalog: plan.id, target: target, kind: kind)
+    }
+    func isFavorite(_ ref: FavoriteReference) -> Bool { favorites.contains { $0.identity == ref.identity } }
+    private var favoriteDestination: [String: Any] { ["bucket": bucket, "profile": profile, "region": region] }
+    func refreshFavorites() async {
+        let identity = privacyID, scope = usageScope
+        do {
+            let value: [FavoriteReference] = try await runtime.request("/folder-library/favorites", method: "POST", body: favoriteDestination)
+            guard identity == privacyID, scope == usageScope else { return }
+            favorites = value; favoriteError = ""
+        } catch { if identity == privacyID { favoriteError = "お気に入りを更新できません。接続を確認して再試行してください。" } }
+    }
+    func toggleFavorite(_ ref: FavoriteReference) async {
+        guard !favoriteBusy, !concealed else { return }
+        favoriteBusy = true
+        defer { favoriteBusy = false }
+        let identity = privacyID, scope = usageScope, active = !isFavorite(ref)
+        do {
+            try await runtime.action("/folder-library/favorites/set", body: favoriteDestination.merging(ref.updateBody(active: active)) { _, new in new })
+            guard identity == privacyID, scope == usageScope else { return }
+            favorites.removeAll { $0.identity == ref.identity }
+            if active { favorites.append(ref) }
+            favoriteError = ""
+        } catch { if identity == privacyID { favoriteError = "お気に入りを保存できません。接続を確認して再試行してください。"; handle(error) } }
+    }
     func recordVideoStart() { UsageActivityStore.shared.record(scope: usageScope, videoStarts: 1) }
     func beginKeychainInteraction() { keychainInteractions += 1 }
     func endKeychainInteraction() async {
@@ -60,14 +89,17 @@ final class MacModel: ObservableObject {
     }
     func applicationDeactivated() async {
         guard keychainInteractions == 0 else { return }
-        concealed = true
-        await relock()
+        if hiddenPagesOpen || hasFolderUnlock {
+            concealed = true
+            await relock()
+        } else {
+            runtime.clearUnlock()
+        }
     }
     func applicationActivated() async {
         // Activation alone must not destroy a PIN sheet or a newly unlocked view.
-        guard concealed else { return }
         concealed = false
-        await relock()
+        needsRefresh = true
     }
     func run(_ work: () async throws -> Void) async {
         guard !busy else { return }
@@ -121,6 +153,7 @@ final class MacModel: ObservableObject {
         guard identity == privacyID, serial == refreshSerial, !concealed else { return }
         library = newLibrary
         needsRefresh = false
+        await refreshFavorites()
     }
     func refreshTrash() async throws {
         let identity = privacyID
@@ -316,11 +349,38 @@ final class MacModel: ObservableObject {
         needsRefresh = true
         hasFolderUnlock = false
         hiddenPagesOpen = false
-        privacyID = UUID(); library = []; trash = []; uploads = []; encryptedUploads = []; videos = []; error = ""; notice = ""
+        privacyID = UUID()
+        library = library.compactMap(Self.withoutProtectedFolders)
+        uploads = uploads.compactMap(Self.withoutProtectedFolders)
+        favorites = []
+        trash = []; encryptedUploads = []; videos = []; error = ""; notice = ""
         runtime.clearUnlock()
         // Removing the local cookie immediately invalidates this client's grant; no network required.
         // poll refreshes the library without blocking upload controls.
         // The cookie and all visible private data have already been cleared.
+    }
+    static func withoutProtectedFolders(_ plan: FolderUpload) -> FolderUpload? {
+        // Filter ancestors too, so children of a PIN-protected folder never remain visible.
+        var hidden = Set(plan.folders.filter(\.isLocked).map(\.id))
+        for _ in plan.folders {
+            let before = hidden.count
+            hidden.formUnion(plan.folders.filter { $0.parentId.map { hidden.contains($0) } == true }.map(\.id))
+            if hidden.count == before { break }
+        }
+        guard let root = plan.folders.first(where: { $0.parentId == nil }), !hidden.contains(root.id),
+              let data = try? JSONEncoder().encode(plan),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        json["folders"] = (json["folders"] as? [[String: Any]])?.filter { !hidden.contains($0["id"] as? String ?? "") }
+        let items = (json["items"] as? [[String: Any]] ?? []).filter { !hidden.contains($0["folderId"] as? String ?? "") }
+        json["items"] = items
+        json["byteSize"] = items.reduce(Int64(0)) { $0 + (($1["byteSize"] as? NSNumber)?.int64Value ?? 0) }
+        json["completed"] = items.filter { $0["state"] as? String == "verified" }.count
+        if !hidden.isEmpty {
+            json["duplicateCount"] = 0; json["skipped"] = 0; json["error"] = ""
+            json.removeValue(forKey: "progress")
+        }
+        guard let sanitized = try? JSONSerialization.data(withJSONObject: json) else { return nil }
+        return try? JSONDecoder().decode(FolderUpload.self, from: sanitized)
     }
     func lock(plan: String, folder: String, password: String?, reuseExistingPIN: Bool = false) async throws {
         var body: [String: Any] = ["planId": plan, "folderId": folder, "confirmSave": true]

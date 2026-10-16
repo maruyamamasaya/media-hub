@@ -21,13 +21,45 @@ final class CloudViewerModel: ObservableObject {
     private var network: URLSession!
     var usageScope: String { configuration.api + "|" + configuration.owner }
     func usageReport() async throws -> UsageReport { try await get("/usage", as: UsageReport.self) }
+    @Published var favorites: [FavoriteReference] = []
+    @Published var favoriteError = ""
+    @Published var favoriteBusy = false
+    func favorite(_ catalog: ReadCatalog, target: String, kind: String) -> FavoriteReference {
+        FavoriteReference(root: catalog.rootId, catalog: catalog.id, target: target, kind: kind)
+    }
+    func isFavorite(_ ref: FavoriteReference) -> Bool { favorites.contains { $0.identity == ref.identity } }
+    func refreshFavorites() async {
+        let identity = sessionID
+        do {
+            let value = try await get("/favorites", as: [FavoriteReference].self)
+            guard identity == sessionID else { return }
+            favorites = value; favoriteError = ""
+        } catch { if identity == sessionID { favoriteError = "お気に入りを更新できません。接続を確認して再試行してください。" } }
+    }
+    func toggleFavorite(_ ref: FavoriteReference) async {
+        guard !favoriteBusy else { return }
+        favoriteBusy = true
+        defer { favoriteBusy = false }
+        let identity = sessionID, active = !isFavorite(ref)
+        struct Saved: Decodable { let saved: Bool }
+        do {
+            let data = try JSONSerialization.data(withJSONObject: ref.updateBody(active: active))
+            let result = try await get("/favorites", as: Saved.self, method: "POST", body: data)
+            guard result.saved, identity == sessionID else { return }
+            favorites.removeAll { $0.identity == ref.identity }
+            if active { favorites.append(ref) }
+            favoriteError = ""
+        } catch { if identity == sessionID { favoriteError = "お気に入りを保存できません。接続を確認して再試行してください。" } }
+    }
     func recordVideoStart() { UsageActivityStore.shared.record(scope: usageScope, videoStarts: 1) }
     private let sealedRequests = SealedRequestGate()
     private var swipePrefetchBudget = ReaderPrefetchBudget()
+    private var sealedPhotoPrefetchBudget = ReaderPrefetchBudget(maximumBytes: 50 * 1024 * 1024)
     // Only ordinary reader images enter this cache; sealed media uses a separate reader.
     private let images = NSCache<NSString, UIImage>()
     private var imageCacheGeneration = UUID()
     private var imageLoads: [String: (UUID, Task<UIImage, Error>)] = [:]
+    private var imageWaiters: [String: Set<UUID>] = [:]
     private var imageLoadStatuses: [String: String] = [:]
     private var imageLoadObservers: [String: [UUID: (String) -> Void]] = [:]
     private func reportImageStatus(_ status: String, key: String) {
@@ -49,7 +81,7 @@ final class CloudViewerModel: ObservableObject {
         imageCacheGeneration = UUID()
         images.removeAllObjects()
         for (_, task) in imageLoads.values { task.cancel() }
-        imageLoads = [:]
+        imageLoads = [:]; imageWaiters = [:]; imageLoadObservers = [:]; imageLoadStatuses = [:]
         let generation = imageCacheGeneration
         Task { await cache.clear(generation: generation) }
     }
@@ -95,11 +127,13 @@ final class CloudViewerModel: ObservableObject {
     private var folderTimer: Timer?
     func relock() {
         swipePrefetchBudget = ReaderPrefetchBudget()
+        sealedPhotoPrefetchBudget = ReaderPrefetchBudget(maximumBytes: 50 * 1024 * 1024)
         images.removeAllObjects()
         for (_, task) in imageLoads.values { task.cancel() }
-        imageLoads = [:]
+        imageLoads = [:]; imageWaiters = [:]; imageLoadObservers = [:]; imageLoadStatuses = [:]
         for (_, task) in thumbnailBatches.values { task.cancel() }
         thumbnailBatches = [:]
+        favorites = []
         catalogs = [:]; catalogDates = [:]; catalogUpdates = [:]
         folderTimer?.invalidate(); folderTimer = nil; folderToken = nil; hasFolderUnlock = false; hiddenPagesOpen = false; roots = []; sessionID = UUID()
     }
@@ -247,6 +281,7 @@ final class CloudViewerModel: ObservableObject {
             let keys = Set(value.map { catalogKey($0.rootId, $0.id) })
             catalogs = catalogs.filter { keys.contains($0.key) }
             for root in value where catalogs[catalogKey(root.rootId, root.id)] != nil { updateCatalog(root) }
+            await refreshFavorites()
         }
         catch is CancellationError { }
         catch { self.error = "フォルダを取得できません。ログイン・接続設定・通信を確認してください。" }
@@ -262,6 +297,13 @@ final class CloudViewerModel: ObservableObject {
         guard identity == sessionID else { throw CancellationError() }
         catalogs[key] = value; catalogDates[key] = Date()
         return value
+    }
+    func reserveSealedPhotoPrefetch(_ root: SealedRoot, item: SealedItem) -> Bool {
+        guard signedIn, hiddenPagesOpen, item.mimeType.hasPrefix("image/"),
+              item.byteSize > 0, item.byteSize <= 5 * 1024 * 1024 else { return false }
+        let chunks = (item.byteSize + Int64(SealedMedia.chunkSize) - 1) / Int64(SealedMedia.chunkSize)
+        let encryptedBytes = item.byteSize + Int64(SealedMedia.headerSize) + chunks * 16
+        return sealedPhotoPrefetchBudget.reserve("\(root.keyID)/\(root.id)/\(item.objectID)/\(item.sha256)", bytes: encryptedBytes)
     }
     func encryptedRoots() async throws -> [SealedRoot] {
         guard hiddenPagesOpen else { throw CancellationError() }
@@ -316,6 +358,26 @@ final class CloudViewerModel: ObservableObject {
               host.hasSuffix(".amazonaws.com"), url.user == nil, url.password == nil else { throw ViewerError.configuration }
         return url
     }
+    func pagingPreview(_ catalog: ReadCatalog, _ item: ReadItem) -> UIImage? {
+        do { try requireCachedAccess(catalog, item) } catch { return nil }
+        return images.object(forKey: "\(imageCacheID(catalog, item))-\(ImageKind.display.rawValue)" as NSString)
+    }
+    // Neighbors may restore already verified files, but never start a network request.
+    func cachedPagingPreview(_ catalog: ReadCatalog, _ item: ReadItem) async -> UIImage? {
+        guard item.mimeType.hasPrefix("image/") else { return nil }
+        if let image = pagingPreview(catalog, item) { return image }
+        let identity = sessionID, generation = imageCacheGeneration
+        do { try requireCachedAccess(catalog, item) } catch { return nil }
+        let cacheID = imageCacheID(catalog, item)
+        let image = await imageCache.image(id: cacheID, kind: .display, item: item, generation: generation)
+        guard !Task.isCancelled, identity == sessionID, generation == imageCacheGeneration else { return nil }
+        do { try requireCachedAccess(catalog, item) } catch { return nil }
+        if let image {
+            images.setObject(image, forKey: "\(cacheID)-\(ImageKind.display.rawValue)" as NSString,
+                             cost: image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0)
+        }
+        return image
+    }
     func image(_ catalog: ReadCatalog, _ item: ReadItem, thumbnail: Bool = false, onStatus: ((String) -> Void)? = nil) async throws -> UIImage {
         try requireCachedAccess(catalog, item)
         try Task.checkCancellation()
@@ -336,29 +398,46 @@ final class CloudViewerModel: ObservableObject {
         else {
             ticket = UUID()
             task = Task {
-                defer { imageLoadStatuses[key] = nil }
+                defer { if imageLoads[key]?.0 == ticket { imageLoadStatuses[key] = nil } }
                 return try await loadImage(catalog, item, thumbnail: thumbnail) { status in
                     self.reportImageStatus(status, key: key)
                 }
             }
             imageLoads[key] = (ticket, task)
         }
-        defer { if imageLoads[key]?.0 == ticket { imageLoads[key] = nil } }
-        let image = try await task.value
+        imageWaiters[key, default: []].insert(observerID)
+        defer { releaseImageWaiter(key, observerID, ticket) }
+        let image = try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            Task { @MainActor in self.releaseImageWaiter(key, observerID, ticket) }
+        }
         try Task.checkCancellation()
         guard identity == sessionID, generation == imageCacheGeneration else { throw CancellationError() }
         try requireCachedAccess(catalog, item)
         return image
     }
-    func prefetchSwipeImages(_ entries: [ReaderEntry], after index: Int) async {
+    private func releaseImageWaiter(_ key: String, _ waiter: UUID, _ ticket: UUID) {
+        guard imageWaiters[key]?.remove(waiter) != nil else { return }
+        imageLoadObservers[key]?[waiter] = nil
+        if imageWaiters[key]?.isEmpty == true {
+            imageWaiters[key] = nil
+            if let (current, task) = imageLoads[key], current == ticket {
+                task.cancel(); imageLoads[key] = nil
+            }
+        }
+    }
+    func prefetchSwipeImages(_ entries: [ReaderEntry], after index: Int, maximumCount: Int = 10, onPrepared: () -> Void = {}) async {
         let identity = sessionID
-        for entry in ReaderSwipeScreen.upcomingPhotos(entries, after: index) {
+        for entry in ReaderSwipeScreen.upcomingPhotos(entries, after: index).prefix(maximumCount) {
             guard !Task.isCancelled, identity == sessionID else { return }
             guard swipePrefetchBudget.reserve(imageCacheID(entry.catalog, entry.item), bytes: entry.item.byteSize) else { continue }
             do {
-                // Keep this work in the view's task so paging/dismissal cancels its download.
-                // Sequential requests leave bandwidth available for the displayed media.
-                _ = try await loadImage(entry.catalog, entry.item, thumbnail: false, onStatus: { _ in })
+                // Foreground display joins this download. Cancelling prefetch only
+                // cancels the network task when there are no remaining viewers.
+                _ = try await image(entry.catalog, entry.item)
+                guard !Task.isCancelled, identity == sessionID else { return }
+                onPrepared()
             } catch {
                 if Task.isCancelled || identity != sessionID { return }
                 // A failed photo must not prevent the rest of the bounded window loading.
@@ -467,7 +546,7 @@ private actor ReaderImageDiskStore {
                   SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == item.sha256 else { throw ViewerError.integrity }
         }
         guard let image = UIImage(data: data) else { throw ViewerError.format }
-        return image
+        return image.preparingForDisplay() ?? image
     }
     func store(_ data: Data, id: String, kind: ImageKind, generation: UUID) {
         guard generation == self.generation, let cache = disk() else { return }
@@ -491,16 +570,29 @@ struct CloudViewerRoot: View {
     @StateObject private var model = CloudViewerModel()
     @State private var tab = 0
     @State private var browseMode = 0
+    @State private var query = ""
+    @State private var order: LibraryOrder = .name
     @Environment(\.scenePhase) private var scenePhase
     var body: some View {
         TabView(selection: $tab) {
             NavigationStack { libraryScreen }
                 .tabItem { Label("見る", systemImage: "folder") }.tag(0)
+            NavigationStack { ReaderFavoritesScreen() }
+                .tabItem { Label("お気に入り", systemImage: "heart") }.tag(5)
             NavigationStack { ReaderOverview(mode: .swipe, active: tab == 3) }
                 .tabItem { Label("スワイプ", systemImage: "rectangle.portrait") }.tag(3)
             NavigationStack { ReaderSettings() }
                 .tabItem { Label("設定", systemImage: "gearshape") }.tag(4)
         }.environmentObject(model).id(model.sessionID)
+        .safeAreaInset(edge: .bottom) {
+            if !model.favoriteError.isEmpty {
+                HStack {
+                    Text(model.favoriteError).font(.caption)
+                    Button("再試行") { Task { await model.refreshFavorites() } }
+                    Button("閉じる") { model.favoriteError = "" }
+                }.padding(10).background(.regularMaterial)
+            }
+        }
         .task { await model.restoreLogin() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background { model.relock() }
@@ -542,14 +634,13 @@ struct CloudViewerRoot: View {
             VStack(spacing: 20) {
                 if !model.error.isEmpty { Text(model.error).foregroundStyle(.red).padding() }
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 14) {
-                    ForEach(model.roots) { root in ReaderRootTile(root: root) }
+                    ForEach(order.arrange(model.roots, query: query, name: { $0.name }, size: { $0.byteSize })) { root in ReaderRootTile(root: root) }
                 }.padding(16)
-                if model.hiddenPagesOpen {
-                    NavigationLink { PhoneSealedLibrary() } label: { Label("暗号化フォルダ", systemImage: "lock.shield") }.padding(.horizontal)
-                }
                 if model.roots.isEmpty && model.error.isEmpty { ContentUnavailableView("フォルダはまだありません", systemImage: "folder") }
             }
         }.refreshable { await model.refresh() }
+        .searchable(text: $query, prompt: "フォルダ名で検索")
+        .toolbar { ToolbarItem { ReaderSortPicker(order: $order) } }
     }
 }
 
@@ -564,6 +655,9 @@ struct ReaderRootTile: View {
         } label: {
             ReaderFolderTile(name: root.name, catalog: catalog, folderID: catalog?.folders.first { $0.parentId == nil }?.id)
         }.buttonStyle(.plain)
+        .overlay(alignment: .topTrailing) {
+            if let catalog, let folder = catalog.folders.first(where: { $0.parentId == nil }) { PhoneFavoriteButton(reference: model.favorite(catalog, target: folder.id, kind: "folder")).padding(4) }
+        }
         .task {
             let identity = model.sessionID
             do { let value = try await model.catalog(root); if identity == model.sessionID, !Task.isCancelled { catalog = value } }
@@ -635,18 +729,21 @@ struct ReaderFolderScreen: View {
     private var protectedChild: Bool {
         latestCatalog.folders.contains { $0.id == folderID && $0.parentId != nil && $0.isLocked }
     }
+    @State private var query = ""
+    @State private var order: LibraryOrder = .name
     @State private var selected: ReadItem?
-    private var items: [ReadItem] { latestCatalog.items.filter { $0.folderId == folderID } }
+    private var items: [ReadItem] { order.arrange(latestCatalog.items.filter { $0.folderId == folderID }, query: query, name: { $0.name }, size: { $0.byteSize }) }
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                let children = latestCatalog.folders.filter { $0.parentId == folderID }
+                let children = order.arrange(latestCatalog.folders.filter { $0.parentId == folderID }, query: query, name: { $0.name }, size: { folder in latestCatalog.items.filter { $0.folderId == folder.id }.reduce(0) { $0 + $1.byteSize } })
                 if !children.isEmpty {
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 14) {
                         ForEach(children) { folder in
                             NavigationLink { ReaderFolderScreen(catalog: latestCatalog, folderID: folder.id) } label: {
                                 ReaderFolderTile(name: folder.name, catalog: latestCatalog, folderID: folder.id)
                             }.buttonStyle(.plain)
+                            .overlay(alignment: .topTrailing) { PhoneFavoriteButton(reference: model.favorite(latestCatalog, target: folder.id, kind: "folder")).padding(4) }
                         }
                     }.padding(.horizontal, 12)
                 }
@@ -654,14 +751,18 @@ struct ReaderFolderScreen: View {
                     ForEach(items) { item in
                         Button { selected = item } label: { ReaderThumbnail(catalog: latestCatalog, item: item) }
                             .buttonStyle(.plain).accessibilityLabel(item.mimeType == "application/pdf" ? item.name : (item.mimeType.hasPrefix("video/") ? "動画" : "写真"))
+                            .contextMenu { Button(model.isFavorite(model.favorite(latestCatalog, target: item.id, kind: "item")) ? "お気に入りから外す" : "お気に入りに追加", systemImage: "heart") { Task { await model.toggleFavorite(model.favorite(latestCatalog, target: item.id, kind: "item")) } } }
                     }
                 }
                 if children.isEmpty && items.isEmpty { ContentUnavailableView("空のフォルダ", systemImage: "folder") }
             }.padding(.vertical, 8)
         }.navigationTitle("").navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $query, prompt: "このフォルダ内を検索")
         .fullScreenCover(item: $selected) { item in ReaderMediaScreen(catalog: latestCatalog, items: items, initialID: item.id) }
         .navigationBarBackButtonHidden(protectedChild)
         .toolbar {
+            ToolbarItem { ReaderSortPicker(order: $order) }
+            ToolbarItem { if let folderID { PhoneFavoriteButton(reference: model.favorite(latestCatalog, target: folderID, kind: "folder")) } }
             if protectedChild {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("閉じて隠す", systemImage: "chevron.backward") {
@@ -704,75 +805,119 @@ struct ReaderMediaScreen: View {
     let catalog: ReadCatalog
     let items: [ReadItem]
     let initialID: String
-    @State private var index = 0
+    @State private var index: Int
     @State private var controls = true
+    @State private var zoomed = false
+    @State private var readyID = ""
+    @State private var previewRevision = 0
+    @State private var refreshToken = 0
+    init(catalog: ReadCatalog, items: [ReadItem], initialID: String) {
+        self.catalog = catalog; self.items = items; self.initialID = initialID
+        _index = State(initialValue: items.firstIndex { $0.id == initialID } ?? 0)
+    }
+    private var item: ReadItem { items[index] }
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            NativeMediaPager(count: items.count, selection: $index, enabled: !zoomed && item.mimeType != "application/pdf") { position, active in
+                ReaderMediaPage(catalog: catalog, item: items[position], active: active,
+                                previewRevision: previewRevision, refreshToken: refreshToken, controls: $controls,
+                                onZoom: { if active { zoomed = $0 } },
+                                onReady: { if active { readyID = items[position].id } })
+                    .environmentObject(model)
+            }.ignoresSafeArea()
+            if controls || item.mimeType.hasPrefix("video/") {
+                VStack {
+                    HStack {
+                        Button { dismiss() } label: { Image(systemName: "xmark").padding(12).background(.black.opacity(0.5), in: Circle()) }.accessibilityLabel("閉じる")
+                        Spacer()
+                        Text("\(index + 1) / \(items.count)").font(.caption.monospacedDigit())
+                        PhoneFavoriteButton(reference: model.favorite(catalog, target: item.id, kind: "item"))
+                        if item.mimeType.hasPrefix("video/") {
+                            Button { refreshToken += 1 } label: { Image(systemName: "arrow.clockwise").padding(12).background(.black.opacity(0.5), in: Circle()) }.accessibilityLabel("再生用の接続を更新")
+                        }
+                        if item.mimeType == "application/pdf" {
+                            Button { move(-1) } label: { Image(systemName: "chevron.left").padding(10) }.disabled(index == 0).accessibilityLabel("前のファイル")
+                            Button { move(1) } label: { Image(systemName: "chevron.right").padding(10) }.disabled(index + 1 == items.count).accessibilityLabel("次のファイル")
+                        }
+                    }.foregroundStyle(.white).padding()
+                    Spacer()
+                }
+            }
+        }.onChange(of: index) { _, _ in controls = true; zoomed = false; readyID = "" }
+        .task(id: readyID) {
+            guard readyID == item.id else { return }
+            await model.prefetchSwipeImages(items.map { ReaderEntry(catalog: catalog, item: $0) }, after: index, maximumCount: 3) { previewRevision += 1 }
+        }
+    }
+    private func move(_ direction: Int) { let next = index + direction; if items.indices.contains(next) { index = next } }
+}
+
+/// Page state survives a cancelled drag. Inactive neighbors never request video or original data.
+struct ReaderMediaPage: View {
+    @EnvironmentObject private var model: CloudViewerModel
+    let catalog: ReadCatalog
+    let item: ReadItem
+    let active: Bool
+    var previewRevision = 0
+    var refreshToken = 0
+    @Binding var controls: Bool
+    let onZoom: (Bool) -> Void
+    let onReady: () -> Void
     @State private var image: UIImage?
     @State private var pdf: Data?
     @State private var player: AVPlayer?
     @State private var loadingStatus = "読み込みを準備中…"
     @State private var error = ""
-    private var item: ReadItem { items[index] }
+    @State private var retry = 0
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            Group {
-                if let pdf { MediaPDFReader(data: pdf).padding(.top, 64) }
-                else if let image { PhoneZoomableImage(image: image, onTap: { controls.toggle() }, onSwipe: move) }
-                else if let player { ReaderVideoPlayer(player: player).id(ObjectIdentifier(player)) }
-                else if !error.isEmpty { VStack { Text(error); Button("再試行") { Task { await load() } } }.foregroundStyle(.white).padding() }
-                else { ReaderLoadingView(status: loadingStatus) }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                .simultaneousGesture(DragGesture(minimumDistance: 40).onEnded { value in
-                    guard image == nil, item.mimeType != "application/pdf", abs(value.translation.width) > abs(value.translation.height) else { return }
-                    move(value.translation.width < 0 ? 1 : -1)
-                })
-            if controls || player != nil {
-                VStack {
-                    HStack {
-                        Button { dismiss() } label: { Image(systemName: "xmark").padding(12).background(.black.opacity(0.5), in: Circle()) }.accessibilityLabel("閉じる")
-                        Spacer()
-                        if item.mimeType.hasPrefix("video/") { Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise").padding(12).background(.black.opacity(0.5), in: Circle()) }.accessibilityLabel("再生用の接続を更新") }
-                    }.foregroundStyle(.white).padding()
-                    Spacer()
-                }
-            }
-        }.onAppear { index = items.firstIndex { $0.id == initialID } ?? 0 }
-        .task(id: item.id) { await load() }
-        .onDisappear { clear() }
+        Group {
+            if let pdf { MediaPDFReader(data: pdf).padding(.top, 64) }
+            else if let image { PhoneZoomableImage(image: image, onTap: { controls.toggle() }, onZoomChanged: onZoom) }
+            else if let player { ReaderVideoPlayer(player: player).id(ObjectIdentifier(player)) }
+            else if !error.isEmpty { VStack { Text(error); Button("再試行") { retry += 1 } }.foregroundStyle(.white).padding() }
+            else { ReaderLoadingView(status: loadingStatus) }
+        }.frame(maxWidth: .infinity, maxHeight: .infinity).background(.black)
+        .task(id: "\(active)/\(retry)/\(active ? refreshToken : previewRevision)") {
+            if active { await load() }
+            else if image == nil { image = await model.cachedPagingPreview(catalog, item) }
+        }
+        .onChange(of: active) { _, active in if !active {
+            player?.pause(); player = nil; pdf = nil
+            if let cg = image?.cgImage, cg.bytesPerRow * cg.height > 20 * 1024 * 1024 { image = nil }
+        } }
+        .onDisappear { player?.pause(); player = nil }
     }
-    private func move(_ direction: Int) {
-        let next = index + direction
-        if items.indices.contains(next) { clear(); index = next; controls = true }
-    }
-    private func clear() { player?.pause(); player = nil; image = nil; pdf = nil; error = ""; loadingStatus = "読み込みを準備中…" }
     private func load() async {
-        let current = item; let identity = model.sessionID
-        clear()
+        let identity = model.sessionID
+        error = ""
         do {
-            if current.mimeType.hasPrefix("video/") {
+            if item.mimeType.hasPrefix("video/") {
+                player?.pause(); player = nil
                 loadingStatus = "動画の接続先を取得中…"
-                let url = try await model.mediaURL(catalog, current)
-                guard !Task.isCancelled, identity == model.sessionID, current.id == item.id else { return }
-                player = AVPlayer(url: url)
-                model.recordVideoStart()
-            } else if current.mimeType == "application/pdf" {
-                loadingStatus = "PDFを受信・照合中…"
-                let data = try await model.pdfData(catalog, current)
-                guard !Task.isCancelled, identity == model.sessionID, current.id == item.id else { return }
-                pdf = data
-            } else {
-                let value = try await model.image(catalog, current) { status in
-                    guard identity == model.sessionID, current.id == item.id else { return }
-                    loadingStatus = status
+                let url = try await model.mediaURL(catalog, item)
+                guard !Task.isCancelled, identity == model.sessionID else { return }
+                player = AVPlayer(url: url); model.recordVideoStart()
+            } else if item.mimeType == "application/pdf" {
+                if pdf == nil {
+                    loadingStatus = "PDFを受信・照合中…"
+                    let data = try await model.pdfData(catalog, item)
+                    guard !Task.isCancelled, identity == model.sessionID else { return }; pdf = data
                 }
-                guard !Task.isCancelled, identity == model.sessionID, current.id == item.id else { return }
-                image = value
+            } else if image == nil {
+                let value = try await model.image(catalog, item) { status in
+                    if identity == model.sessionID { loadingStatus = status }
+                }
+                guard !Task.isCancelled, identity == model.sessionID else { return }; image = value
             }
-        } catch { if !Task.isCancelled, identity == model.sessionID, current.id == item.id { self.error = "表示できません。通信を確認してください。" } }
+            guard !Task.isCancelled, identity == model.sessionID else { return }; onReady()
+        } catch { if !Task.isCancelled, identity == model.sessionID { self.error = "表示できません。通信を確認してください。" } }
     }
 }
 
 struct ReaderSettings: View {
+    @AppStorage("sealedPhotoPrefetch") private var sealedPhotoPrefetch = true
+    @State private var sealedFavoritesOnly: Bool?
     @EnvironmentObject private var model: CloudViewerModel
     @State private var value = CloudConfiguration()
     var body: some View {
@@ -782,11 +927,19 @@ struct ReaderSettings: View {
             }
             if model.signedIn { Section { FolderUnlockControl() } }
             Section { if model.signedIn { Button("ログアウト") { model.signOut() } } else { Button("本人ログイン") { Task { await model.login() } }.disabled(!model.configuration.valid || model.busy) } }
-            if model.hiddenPagesOpen { Section("暗号化の鍵") { PhoneSealedKeyImport() } }
+            if model.signedIn && model.hiddenPagesOpen {
+                Section("暗号化") {
+                    PhoneSealedEntry(favoritesOnly: false) { sealedFavoritesOnly = false }
+                    PhoneSealedEntry(favoritesOnly: true) { sealedFavoritesOnly = true }
+                }
+            }
             Section("キャッシュ") {
                 Text("通常の写真とサムネイルを最大1GB保存します。容量が増えると古いものから削除します。暗号化した内容は長期保存しません。")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("キャッシュを削除") { model.clearImageCache() }
+                Toggle("暗号化写真をWi-Fiで先読み", isOn: $sealedPhotoPrefetch)
+                Text("次の1枚・5MB以下。解除中は先読み合計50MBまで。復号画像は閲覧画面のメモリだけで保持し、閉じると破棄します。省データモードでは先読みしません。")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section {
                 DisclosureGroup("接続設定") {
@@ -798,6 +951,9 @@ struct ReaderSettings: View {
                 }
             }
         }.navigationTitle("設定").onAppear { value = model.configuration }
+        .navigationDestination(item: $sealedFavoritesOnly) { favoritesOnly in
+            if model.signedIn && model.hiddenPagesOpen { PhoneSealedLibrary(favoritesOnly: favoritesOnly) }
+        }
     }
 }
 
@@ -941,93 +1097,6 @@ struct ReaderVideoPlayer: View {
     }
 }
 
-struct PhoneZoomableImage: UIViewRepresentable {
-    let image: UIImage
-    let onTap: () -> Void
-    let onSwipe: (Int) -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-    func makeUIView(context: Context) -> PhoneImageScrollView {
-        let view = PhoneImageScrollView()
-        view.delegate = context.coordinator
-        view.minimumZoomScale = 1
-        view.maximumZoomScale = 6
-        view.bouncesZoom = true
-        view.showsHorizontalScrollIndicator = false
-        view.showsVerticalScrollIndicator = false
-        view.contentInsetAdjustmentBehavior = .never
-        view.imageView.image = image
-        view.imageView.contentMode = .scaleAspectFit
-        view.addSubview(view.imageView)
-        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tap))
-        view.addGestureRecognizer(tap)
-        for direction in [UISwipeGestureRecognizer.Direction.left, .right] {
-            let swipe = UISwipeGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.swipe(_:)))
-            swipe.direction = direction
-            swipe.delegate = context.coordinator
-            view.addGestureRecognizer(swipe)
-            view.panGestureRecognizer.require(toFail: swipe)
-            tap.require(toFail: swipe)
-        }
-        return view
-    }
-    func updateUIView(_ view: PhoneImageScrollView, context: Context) {
-        context.coordinator.parent = self
-        if view.imageView.image !== image {
-            view.setZoomScale(1, animated: false)
-            view.imageView.image = image
-            view.fittedSize = .zero
-            view.setNeedsLayout()
-        }
-    }
-    final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
-        var parent: PhoneZoomableImage
-        init(_ parent: PhoneZoomableImage) { self.parent = parent }
-        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
-            (scrollView as? PhoneImageScrollView)?.imageView
-        }
-        func scrollViewDidZoom(_ scrollView: UIScrollView) {
-            (scrollView as? PhoneImageScrollView)?.centerImage()
-        }
-        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-            guard let scroll = gestureRecognizer.view as? UIScrollView else { return false }
-            let pinch = scroll.pinchGestureRecognizer
-            return Self.allowsPaging(zoomScale: scroll.zoomScale,
-                                     pinchTouches: pinch?.numberOfTouches ?? 0,
-                                     pinchState: pinch?.state ?? .possible)
-        }
-        static func allowsPaging(zoomScale: CGFloat, pinchTouches: Int, pinchState: UIGestureRecognizer.State) -> Bool {
-            // A possible pinch also tracks a single finger; that is still a paging gesture.
-            // Keep blocking an active pinch when one finger lifts before the other.
-            zoomScale <= 1.001 && pinchTouches < 2 && pinchState != .began && pinchState != .changed
-        }
-        @objc func tap() { parent.onTap() }
-        @objc func swipe(_ gesture: UISwipeGestureRecognizer) {
-            parent.onSwipe(gesture.direction == .left ? 1 : -1)
-        }
-    }
-}
-
-final class PhoneImageScrollView: UIScrollView {
-    let imageView = UIImageView()
-    var fittedSize = CGSize.zero
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        if bounds.size != fittedSize, bounds.width > 0, bounds.height > 0,
-           let image = imageView.image, image.size.width > 0, image.size.height > 0 {
-            fittedSize = bounds.size
-            setZoomScale(1, animated: false)
-            let ratio = min(bounds.width / image.size.width, bounds.height / image.size.height)
-            imageView.frame = CGRect(origin: .zero, size: CGSize(width: image.size.width * ratio, height: image.size.height * ratio))
-            contentSize = imageView.frame.size
-        }
-        centerImage()
-    }
-    func centerImage() {
-        contentInset = UIEdgeInsets(top: max(0, (bounds.height - imageView.frame.height) / 2), left: max(0, (bounds.width - imageView.frame.width) / 2), bottom: 0, right: 0)
-    }
-}
-
 struct ReaderEntry: Identifiable {
     let catalog: ReadCatalog
     let item: ReadItem
@@ -1122,7 +1191,8 @@ struct ReaderOverview: View {
 }
 
 struct ReaderPrefetchBudget {
-    private(set) var remainingBytes: Int64 = 100 * 1024 * 1024
+    private(set) var remainingBytes: Int64
+    init(maximumBytes: Int64 = 100 * 1024 * 1024) { remainingBytes = maximumBytes }
     private var attempted = Set<String>()
     mutating func reserve(_ id: String, bytes: Int64) -> Bool {
         guard bytes > 0, bytes <= remainingBytes, !attempted.contains(id) else { return false }
@@ -1151,78 +1221,45 @@ struct ReaderSwipeScreen: View {
     @Environment(\.scenePhase) private var scenePhase
     let entries: [ReaderEntry]
     @State private var index = 0
-    @State private var image: UIImage?
-    @State private var player: AVPlayer?
-    @State private var loadingStatus = "読み込みを準備中…"
-    @State private var error = ""
-    @State private var retry = 0
+    @State private var controls = true
+    @State private var zoomed = false
+    @State private var readyID = ""
+    @State private var previewRevision = 0
     private var entry: ReaderEntry { entries[index] }
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            Group {
-                if let image { Image(uiImage: image).resizable().scaledToFit() }
-                else if let player { ReaderVideoPlayer(player: player).id(ObjectIdentifier(player)) }
-                else if !error.isEmpty {
-                    VStack { Text(error); Button("再試行") { retry += 1 } }.foregroundStyle(.white)
-                } else { ReaderLoadingView(status: loadingStatus) }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            VStack {
-                HStack {
-                    Button { dismiss() } label: { Image(systemName: "xmark").padding(12).background(.black.opacity(0.5), in: Circle()) }.accessibilityLabel("閉じる")
+            NativeMediaPager(count: entries.count, selection: $index, vertical: true, enabled: !zoomed) { position, active in
+                ReaderMediaPage(catalog: entries[position].catalog, item: entries[position].item,
+                                active: active && scenePhase == .active,
+                                previewRevision: previewRevision, controls: $controls,
+                                onZoom: { if active { zoomed = $0 } },
+                                onReady: { if active { readyID = entries[position].id } })
+                    .environmentObject(model)
+            }.ignoresSafeArea()
+            if controls || entry.item.mimeType.hasPrefix("video/") {
+                VStack {
+                    HStack {
+                        Button { dismiss() } label: { Image(systemName: "xmark").padding(12).background(.black.opacity(0.5), in: Circle()) }.accessibilityLabel("閉じる")
+                        Spacer()
+                        PhoneFavoriteButton(reference: model.favorite(entry.catalog, target: entry.item.id, kind: "item"))
+                        Text("\(index + 1) / \(entries.count)").font(.caption.monospacedDigit())
+                    }
                     Spacer()
-                    Text("\(index + 1) / \(entries.count)").font(.caption.monospacedDigit())
-                }
-                Spacer()
-                HStack {
-                    Label(entry.item.mimeType.hasPrefix("video/") ? "動画" : "写真", systemImage: entry.item.mimeType.hasPrefix("video/") ? "video" : "photo")
-                    Text(entry.catalog.name).lineLimit(1)
-                    Spacer()
-                    Button { move(-1) } label: { Image(systemName: "chevron.up").padding(12) }.disabled(index == 0).accessibilityLabel("前へ")
-                    Button { move(1) } label: { Image(systemName: "chevron.down").padding(12) }.disabled(index == entries.count - 1).accessibilityLabel("次へ")
-                }.font(.caption).padding(8).background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
-            }.foregroundStyle(.white).padding()
-        }
-        .simultaneousGesture(DragGesture(minimumDistance: 50).onEnded { value in
-            guard abs(value.translation.height) > abs(value.translation.width) else { return }
-            move(value.translation.height < 0 ? 1 : -1)
-        })
-        .task(id: entry.id + "/\(retry)/\(scenePhase)") {
-            guard scenePhase == .active else { return }
-            let position = index
-            await load()
-            guard !Task.isCancelled, position == index, scenePhase == .active else { return }
-            await model.prefetchSwipeImages(entries, after: position)
-        }
-        .onDisappear { clear() }
-        .onChange(of: scenePhase) { _, phase in if phase != .active { clear(); dismiss() } }
-    }
-    private func move(_ direction: Int) {
-        let next = index + direction
-        guard entries.indices.contains(next) else { return }
-        clear(); index = next
-    }
-    private func clear() { player?.pause(); player = nil; image = nil; error = ""; loadingStatus = "読み込みを準備中…" }
-    private func load() async {
-        let current = entry, identity = model.sessionID
-        clear()
-        do {
-            if current.item.mimeType.hasPrefix("video/") {
-                loadingStatus = "動画の接続先を取得中…"
-                let url = try await model.mediaURL(current.catalog, current.item)
-                guard !Task.isCancelled, identity == model.sessionID, current.id == entry.id else { return }
-                player = AVPlayer(url: url)
-                model.recordVideoStart()
-            } else {
-                let value = try await model.image(current.catalog, current.item) { status in
-                    guard identity == model.sessionID, current.id == entry.id else { return }
-                    loadingStatus = status
-                }
-                guard !Task.isCancelled, identity == model.sessionID, current.id == entry.id else { return }
-                image = value
+                    HStack {
+                        Text(entry.catalog.name).lineLimit(1)
+                        Spacer()
+                        Button { move(-1) } label: { Image(systemName: "chevron.up").padding(12) }.disabled(index == 0).accessibilityLabel("前へ")
+                        Button { move(1) } label: { Image(systemName: "chevron.down").padding(12) }.disabled(index + 1 == entries.count).accessibilityLabel("次へ")
+                    }.font(.caption).padding(8).background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+                }.foregroundStyle(.white).padding()
             }
-        } catch {
-            if !Task.isCancelled, identity == model.sessionID, current.id == entry.id { self.error = "表示できません。通信を確認してください。" }
+        }.onChange(of: index) { _, _ in controls = true; zoomed = false; readyID = "" }
+        .task(id: readyID) {
+            guard readyID == entry.id, scenePhase == .active else { return }
+            await model.prefetchSwipeImages(entries, after: index) { previewRevision += 1 }
         }
+        .onChange(of: scenePhase) { _, phase in if phase != .active { dismiss() } }
     }
+    private func move(_ direction: Int) { let next = index + direction; if entries.indices.contains(next) { index = next } }
 }

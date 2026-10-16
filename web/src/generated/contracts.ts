@@ -178,6 +178,7 @@ export interface FolderUpload {
   progress?: UploadProgress;
   duplicateCount?: number;
   completedAt?: number;
+  rootId?: string;
 }
 
 export interface ReadRoot {
@@ -314,5 +315,13 @@ export interface UsageReport {
   history: UsagePoint[];
   budget?: UsageBudget;
   notes: string[];
+}
+
+export interface FavoriteReference {
+  space: string;
+  rootId: string;
+  catalogId: string;
+  targetId: string;
+  kind: string;
 }
 

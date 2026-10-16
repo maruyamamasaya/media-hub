@@ -1,6 +1,7 @@
 import AppKit
 import AssetLibraryContract
 import SwiftUI
+import PhotoHubCore
 
 private let mediaColumns = [GridItem(.adaptive(minimum: 130, maximum: 210), spacing: 12)]
 
@@ -54,20 +55,23 @@ struct FolderScreen: View {
     @EnvironmentObject var model: MacModel
     let plan: FolderUpload
     let folderID: String?
+    @State private var query = ""
+    @State private var order: LibraryOrder = .name
     @State private var selecting = false
     @State private var selectedItems: Set<String> = []
     @State private var trashFolder: String?
     @State private var confirmingTrash = false
     @State private var locking = false
     @State private var selection: GallerySelection?
-    private var folders: [MediaFolder] { plan.folders.filter { $0.parentId == folderID } }
-    private var files: [FolderUploadItem] { plan.items.filter { $0.folderId == folderID } }
+    private var folders: [MediaFolder] { order.arrange(plan.folders.filter { $0.parentId == folderID }, query: query, name: { $0.name }, size: { folder in plan.items.filter { $0.folderId == folder.id }.reduce(0) { $0 + $1.byteSize } }) }
+    private var files: [FolderUploadItem] { order.arrange(plan.items.filter { $0.folderId == folderID }, query: query, name: { $0.name }, size: { $0.byteSize }) }
     var body: some View {
         ScrollView {
             LazyVGrid(columns: mediaColumns, spacing: 12) {
                 ForEach(folders, id: \.id) { folder in
                     NavigationLink(value: "\(plan.id):\(folder.id)") { FolderTile(name: folder.name, protection: folder.isLocked ? "通常保存 · PIN解除中" : "通常保存 · 内容暗号化なし") }
                         .buttonStyle(.plain)
+                        .overlay(alignment: .topTrailing) { MacFavoriteButton(reference: model.favorite(plan, target: folder.id, kind: "folder")).padding(6) }
                         .contextMenu { Button("フォルダをごみ箱へ", role: .destructive) { trashFolder = folder.id; confirmingTrash = true } }
                 }
                 ForEach(files, id: \.id) { item in
@@ -83,6 +87,7 @@ struct FolderScreen: View {
                     .overlay(alignment: .topTrailing) {
                         if selecting { Image(systemName: selectedItems.contains(item.id) ? "checkmark.circle.fill" : "circle").font(.title2).padding(8).foregroundStyle(Color.accentColor).allowsHitTesting(false) }
                     }
+                    .overlay(alignment: .topLeading) { if !selecting { MacFavoriteButton(reference: model.favorite(plan, target: item.id, kind: "item")).padding(6) } }
                     .contextMenu { Button("ごみ箱へ", role: .destructive) { selectedItems = [item.id]; trashFolder = nil; confirmingTrash = true } }
                 }
             }.padding(20)
@@ -90,7 +95,9 @@ struct FolderScreen: View {
             Text(plan.folders.first(where: { $0.id == folderID })?.isLocked == true ? "このフォルダ：鍵あり・解除中" : "このフォルダ自身：鍵なし（親に鍵がある場合は親の保護が適用されます）")
                 .font(.caption).foregroundStyle(.secondary).padding(.bottom, 12)
         }.navigationTitle(plan.folders.first { $0.id == folderID }?.name ?? plan.name)
+        .searchable(text: $query, prompt: "このフォルダ内を検索")
         .toolbar {
+            LibrarySortPicker(order: $order)
             Button(selecting ? "選択を終了" : "選択") { selecting.toggle(); selectedItems = [] }
             if selecting {
                 Button("選択した\(selectedItems.count)件をごみ箱へ", systemImage: "trash") { trashFolder = nil; confirmingTrash = true }.disabled(selectedItems.isEmpty || model.busy)
@@ -104,6 +111,7 @@ struct FolderScreen: View {
                 Task { await model.run { try await model.moveToTrash(plan: plan.id, items: folder == nil ? ids : [], folder: folder); selectedItems = []; selecting = false } }
             }
         } message: { Text("Macの元ファイルは保持します。ごみ箱から復元できます。") }
+        .onChange(of: model.privacyID) { _ in query = ""; selection = nil; locking = false; confirmingTrash = false; selectedItems = [] }
         .sheet(isPresented: $locking) { FolderPasswordSheet(plan: plan.id, folder: folderID, folderLocked: plan.folders.first(where: { $0.id == folderID })?.isLocked == true) }
         .sheet(item: $selection) { selected in
             MediaGallery(plan: plan, items: files, initialID: selected.id)
@@ -157,6 +165,7 @@ struct MediaGallery: View {
                 Spacer()
                 if let index { Text("\(index + 1) / \(items.count)").font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit() }
                 if let current {
+                    MacFavoriteButton(reference: model.favorite(plan, target: current.id, kind: "item"))
                     Button { Task { await model.run { try await model.export(path(current), name: current.name) } } } label: { Image(systemName: "square.and.arrow.down") }
                         .help("ファイルを保存").accessibilityLabel("ファイルを保存").disabled(model.busy)
                 }

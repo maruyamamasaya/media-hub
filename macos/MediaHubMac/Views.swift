@@ -11,11 +11,10 @@ struct MacRootView: View {
     @State private var page = "S3フォルダ"
     var body: some View {
         NavigationSplitView {
-            List(["S3フォルダ", "アップロード"] + (model.hiddenPagesOpen ? ["暗号化フォルダ", "暗号化アップロード"] : []) + ["軽量版を作る", "容量と費用", "設定"], id: \.self, selection: $page) { Text($0) }
+            List(["S3フォルダ", "お気に入り", "アップロード"] + (model.hiddenPagesOpen ? ["暗号化フォルダ", "暗号化アップロード"] : []) + ["軽量版を作る", "容量と費用", "設定"], id: \.self, selection: $page) { Text($0) }
                 .navigationTitle("media-hub").frame(minWidth: 180)
         } detail: {
-            if model.concealed { Text("アプリに戻るとフォルダを再確認します。") }
-            else if !runtime.ready { VStack(spacing: 16) { if runtime.error.isEmpty { ProgressView("起動中…") } else { Text(runtime.error).foregroundStyle(.red) } }.padding() }
+            if !runtime.ready { VStack(spacing: 16) { if runtime.error.isEmpty { ProgressView("起動中…") } else { Text(runtime.error).foregroundStyle(.red) } }.padding() }
             else {
                 VStack(spacing: 0) {
                     if !model.notice.isEmpty { Label(model.notice, systemImage: "checkmark.circle.fill").foregroundStyle(.green).padding() }
@@ -31,15 +30,17 @@ struct MacRootView: View {
                     }
                     Group {
                         switch page {
+                        case "お気に入り": MacFavoritesScreen().id(model.privacyID)
                         case "アップロード": UploadScreen()
-                        case "暗号化フォルダ": if model.hiddenPagesOpen { SealedLibraryScreen() }
-                        case "暗号化アップロード": if model.hiddenPagesOpen { UploadScreen(encrypted: true) }
+                        case "暗号化フォルダ": if model.hiddenPagesOpen { SealedLibraryScreen().id(model.privacyID) }
+                        case "暗号化アップロード": if model.hiddenPagesOpen { UploadScreen(encrypted: true).id(model.privacyID) }
                         case "軽量版を作る": NavigationStack { LightVideoScreen() }
                         case "設定": SettingsScreen()
                         case "容量と費用": MacUsageScreen()
                         default: LibraryScreen()
                         }
-                    }.environmentObject(model).id(model.privacyID)
+                    }.environmentObject(model)
+                    .overlay { if model.concealed { Color(nsColor: .windowBackgroundColor).overlay(Text("隠したフォルダをロックしました。")) } }
                 }.navigationTitle(page)
             }
         }
@@ -77,6 +78,7 @@ struct SettingsScreen: View {
                 TextField("リージョン", text: $model.region)
                 Text("通常は変更不要です。AWS秘密鍵は入力しません。")
             }
+            Section("サムネイルキャッシュ") { MacThumbnailCacheSettings() }
             Section("作業領域") { Text(model.runtime.dataRoot.path).textSelection(.enabled) }
             Section("AWSログイン") {
                 Button("AWSにログイン") { model.openAWSLogin() }
@@ -249,6 +251,7 @@ struct UploadScreen: View {
                 }.font(.caption).foregroundStyle(.secondary)
             }.frame(maxWidth: 800, alignment: .leading).padding(32).frame(maxWidth: .infinity)
         }.background(Color(nsColor: .windowBackgroundColor)).controlSize(.large)
+            .onChange(of: model.privacyID) { _ in selectedID = nil; draft = nil }
             .onChange(of: finished.map(\.id)) { ids in
                 if let selectedID, ids.contains(selectedID) { self.selectedID = nil; draft = nil }
             }
@@ -359,6 +362,9 @@ struct UploadPlanView: View {
 }
 struct LibraryScreen: View {
     @EnvironmentObject var model: MacModel
+    @State private var query = ""
+    @State private var order: LibraryOrder = .name
+    private var visibleLibrary: [FolderUpload] { order.arrange(model.library, query: query, name: { $0.name }, size: { $0.byteSize }) }
     @State private var unlocking = false
     @State private var showingTrash = false
     @State private var rootTrash: FolderUpload?
@@ -374,6 +380,7 @@ struct LibraryScreen: View {
         if let root = plan.folders.first(where: { $0.parentId == nil }) {
             let key: String = plan.id + ":" + root.id
             NavigationLink(value: key) { FolderTile(name: plan.name, protection: root.isLocked ? "通常保存 · PIN解除中" : "通常保存 · 内容暗号化なし", detail: "\(plan.items.count)件 · \(size(plan.byteSize))") }.buttonStyle(.plain)
+                .overlay(alignment: .topTrailing) { MacFavoriteButton(reference: model.favorite(plan, target: root.id, kind: "folder")).padding(6) }
                 .contextMenu { Button("フォルダをごみ箱へ", role: .destructive) { rootTrash = plan } }
         }
     }
@@ -384,10 +391,11 @@ struct LibraryScreen: View {
                     Text("通常保存のフォルダです。PINは一覧を隠すための鍵で、内容の暗号化とは別です。")
                         .font(.callout).foregroundStyle(.secondary)
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 130, maximum: 210), spacing: 12)], spacing: 12) {
-                        ForEach(model.library, id: \.id) { plan in
+                        ForEach(visibleLibrary, id: \.id) { plan in
                             rootLink(plan)
                         }
                     }
+                    if !model.library.isEmpty && visibleLibrary.isEmpty { Text("一致するフォルダはありません。").foregroundStyle(.secondary).padding() }
                     if model.library.isEmpty {
                         Text(model.refreshing ? "S3のフォルダ情報を確認しています…" : "表示できるフォルダはありません。鍵付きフォルダは「隠したフォルダを開く」から表示できます。")
                             .foregroundStyle(.secondary).padding(.vertical, 24)
@@ -400,7 +408,9 @@ struct LibraryScreen: View {
                     FolderScreen(plan: plan, folderID: parts[1])
                 }
             }
+            .searchable(text: $query, prompt: "フォルダ名で検索")
             .toolbar {
+                LibrarySortPicker(order: $order)
                 Button("ごみ箱", systemImage: "trash") { showingTrash = true }
                 Button("隠したフォルダを開く", systemImage: "lock.open") { unlocking = true }
                 if model.hiddenPagesOpen || model.hasFolderUnlock { Button("閉じて隠す", systemImage: "lock") { Task { await model.relock() } } }
@@ -419,6 +429,7 @@ struct LibraryScreen: View {
                 Task { await model.relock() }
             }
         }
+        .onChange(of: model.privacyID) { _ in query = ""; showingTrash = false; rootTrash = nil }
         .sheet(isPresented: $showingTrash) { CloudTrashScreen() }
         .confirmationDialog("「\(rootTrash?.name ?? "フォルダ")」全体をごみ箱へ移しますか？", isPresented: Binding(get: { rootTrash != nil }, set: { if !$0 { rootTrash = nil } }), titleVisibility: .visible) {
             if let plan = rootTrash, let root = plan.folders.first(where: { $0.parentId == nil }) {
