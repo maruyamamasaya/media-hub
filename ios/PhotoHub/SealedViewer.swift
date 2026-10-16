@@ -110,7 +110,7 @@ struct PhoneSealedRootRow: View {
             else { ProgressView("暗号化フォルダを復号中…") }
         }.task {
             let identity = model.sessionID
-            let reader = phoneSealedReader(model, root: root, secret: secret, objectID: nil, length: nil, maximum: 4 * 1024 * 1024)
+            let reader = phoneSealedReader(model, root: root, secret: secret, objectID: nil, length: nil, maximum: Int64(CatalogLimits.maximumBytes))
             do {
                 let bytes = try await reader.allData()
                 let value = try JSONDecoder().decode(SealedCatalog.self, from: bytes); try value.validate(root: root, secret: secret)

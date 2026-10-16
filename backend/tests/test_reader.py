@@ -42,6 +42,45 @@ class ReaderTests(unittest.TestCase):
     def call(self, path='/library', method='GET', owner=OWNER, query=None, headers=None, body=None):
         return reader.handler({'rawPath': path, 'headers': headers or {}, 'body': json.dumps(body) if body else '', 'queryStringParameters': query, 'requestContext': {'http': {'method': method}, 'authorizer': {'jwt': {'claims': {'sub': owner} if owner else {}}}}}, None)
 
+    def test_sixteen_mib_storage_boundary(self):
+        base = len(json.dumps(self.fake.value).encode())
+        self.fake.value['name'] += 'x' * (16 * 1024 ** 2 - base)
+        self.assertEqual(reader.catalog(self.fake, 'test-bucket', ROOT, UPLOAD)['id'], UPLOAD)
+        self.fake.value['name'] += 'x'
+        with self.assertRaises(ValueError): reader.catalog(self.fake, 'test-bucket', ROOT, UPLOAD)
+
+    def test_large_public_catalog_chunks_reassemble_and_fit_lambda(self):
+        import hashlib
+        import base64
+        self.fake.value['items'][0]['name'] = '写真\\"' * 600000
+        self.assertGreater(len(json.dumps(self.fake.value).encode()), 4 * 1024 ** 2)
+        path = f'/catalogs/{ROOT}/{UPLOAD}'
+        self.assertEqual(self.call(path)['statusCode'], 413)
+        raw = bytearray(); offset = 0; digest = None
+        while offset is not None:
+            result = self.call(path, query={'catalogOffset': str(offset), 'catalogDigest': digest or ''})
+            self.assertEqual(result['statusCode'], 200)
+            self.assertLess(len(json.dumps(result).encode()), 2 * 1024 ** 2)
+            chunk = json.loads(result['body'])
+            self.assertEqual(chunk['offset'], len(raw))
+            raw.extend(base64.b64decode(chunk['data']))
+            digest = chunk['sha256']; offset = chunk['nextOffset']
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), digest)
+        self.assertEqual(json.loads(raw), reader.public_catalog(self.fake.value))
+
+    def test_catalog_chunks_validate_offset_revision_and_access_each_time(self):
+        path = f'/catalogs/{ROOT}/{UPLOAD}'
+        self.fake.value['items'][0]['name'] = 'x' * (2 * 1024 ** 2)
+        first = json.loads(self.call(path, query={'catalogOffset': '0'})['body'])
+        for offset in ['-1', '1', '01', 'not-a-number', '9999999999']:
+            self.assertEqual(self.call(path, query={'catalogOffset': offset})['statusCode'], 400)
+        query = {'catalogOffset': str(first['nextOffset']), 'catalogDigest': first['sha256']}
+        self.fake.value['name'] += 'changed'
+        self.assertEqual(self.call(path, query=query)['statusCode'], 409)
+        self.assertEqual(self.call(path, query=query, owner=None)['statusCode'], 401)
+        self.fake.settings['locks'] = [folder_security.make_lock(ROOT, FOLDER, '012345')]
+        self.assertEqual(self.call(path, query=query)['statusCode'], 404)
+
     def test_pdf_catalog_and_original_url_keep_owner_and_folder_protection(self):
         self.fake.value['items'][0].update(name='Book.pdf', mimeType='application/pdf')
         path = f'/catalogs/{ROOT}/{UPLOAD}'

@@ -92,27 +92,22 @@ struct UploadScreen: View {
     private var uploads: [FolderUpload] { encrypted ? model.encryptedUploads : model.uploads }
     @State private var selectedID: String?
     @State private var draft: FolderUpload?
-    private var plan: FolderUpload? { uploads.first { $0.id == selectedID } ?? draft }
+    private var pending: [FolderUpload] { uploads.filter { $0.state != "complete" } }
+    private var finished: [FolderUpload] { uploads.filter { $0.state == "complete" }.sorted { ($0.completedAt ?? 0) > ($1.completedAt ?? 0) } }
+    private var plan: FolderUpload? { uploads.first { $0.id == model.uploadBatch?.activeID } ?? uploads.first { $0.id == selectedID } ?? draft ?? pending.first }
     private var choosingDisabled: Bool { model.busy || sending || model.awsLoginRequired }
     private var sending: Bool { uploads.contains { ["uploading", "queued"].contains($0.state) } }
     private func chooseFolder() { addFolders(model.chooseFolders()) }
     private func addFolders(_ urls: [URL]) {
         guard !choosingDisabled, !urls.isEmpty, !encrypted || model.encryptionReady else { return }
         Task { await model.run {
-            let identity = model.privacyID
             // Ignore duplicates and nested selections; selecting a parent already includes its children.
             let unique = Array(Set(urls.map { $0.standardizedFileURL })).sorted { $0.path < $1.path }
             let roots = unique.filter { url in !unique.contains { $0 != url && url.path.hasPrefix($0.path + "/") } }
             guard roots.count <= 50 else { throw MacAPIError.message("1回に50フォルダまで選択してください。") }
-            var plans: [FolderUpload] = []
-            for url in roots {
-                guard identity == model.privacyID, !model.concealed else { throw CancellationError() }
-                let value = try await model.scan(url.path, encrypted: encrypted)
+            try await model.prepareUploads(roots.map(\.path), encrypted: encrypted) { value in
                 draft = value; selectedID = value.id
-                plans.append(value)
             }
-            guard identity == model.privacyID, !model.concealed else { throw CancellationError() }
-            try await model.uploadQueue(plans, encrypted: encrypted)
         } }
     }
     private func discard(_ value: FolderUpload) {
@@ -131,20 +126,33 @@ struct UploadScreen: View {
             VStack(alignment: .leading, spacing: 28) {
                 HStack(alignment: .top) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(encrypted ? "暗号化して追加" : "写真・動画・PDFを追加").font(.system(size: 26, weight: .semibold))
-                        Text("フォルダを選ぶか、ここへドラッグするとアップロードが始まります。")
+                        Text(encrypted ? "鍵をかけて追加" : "写真・動画・PDFを追加").font(.system(size: 26, weight: .semibold))
+                        Text("フォルダを選ぶか、ここへドラッグ。準備できたフォルダから順に送ります。")
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
                     if plan != nil {
-                        Button("フォルダを選ぶ", systemImage: "plus") { chooseFolder() }
+                        Button("フォルダを追加", systemImage: "plus") { chooseFolder() }
                             .controlSize(.large).disabled(choosingDisabled || (encrypted && !model.encryptionReady))
                     }
                 }
-                if encrypted { SealedKeyManagement() }
+                if encrypted {
+                    Text("写真・動画・PDFの中身と名前を暗号化して保存します。開くには、このMacやiPhoneに同じ鍵が必要です。")
+                        .font(.callout).foregroundStyle(.secondary)
+                    SealedKeyManagement()
+                }
+                if model.uploadBatch != nil {
+                    HStack {
+                        Text(model.uploadBatchStopping ? "停止しています。準備中の読み取りと処理中の送信が終わるまでお待ちください。" : "送信しながら次のフォルダを準備します。")
+                            .font(.callout).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("追加と送信を停止") { Task { await model.stopUploadPreparation() } }
+                            .disabled(model.uploadBatchStopping)
+                    }
+                }
                 if model.scanning {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("アップロードを準備しています…")
+                        Text("フォルダを読み取り、内容を照合しています…").font(.headline)
                         if model.scanTotalBytes > 0 {
                             ProgressView(value: Double(model.scanBytes), total: Double(model.scanTotalBytes))
                             Text("\(size(model.scanBytes)) / \(size(model.scanTotalBytes))").font(.caption)
@@ -152,6 +160,7 @@ struct UploadScreen: View {
                         if let seconds = model.scanRemainingSeconds {
                             Text("残り約\(max(1, (seconds + 59) / 60))分（目安）").font(.caption).foregroundStyle(.secondary)
                         }
+                        Text("Macの原本は変更しません。準備できたフォルダから送信します。")
                         Text("\(model.scanName) · 読み取り済み \(size(model.scanBytes))").font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -187,16 +196,16 @@ struct UploadScreen: View {
                         Text("追加するフォルダを選んでください").font(.headline)
                         Text(encrypted ? "原本・小画像・ファイル名を暗号化して保存します。" : "写真・動画・PDFとフォルダ構成をそのまま保存します。")
                             .font(.callout).foregroundStyle(.secondary)
-                        Button("フォルダを選ぶ", systemImage: "folder.badge.plus") { chooseFolder() }
+                        Button("フォルダを選んで追加", systemImage: "folder.badge.plus") { chooseFolder() }
                             .buttonStyle(.borderedProminent).controlSize(.large).disabled(choosingDisabled || (encrypted && !model.encryptionReady))
                     }.frame(maxWidth: .infinity).padding(.vertical, 44)
                         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 16))
                 }
-                if !uploads.isEmpty {
+                if !pending.isEmpty {
                     VStack(alignment: .leading, spacing: 14) {
-                        Text("アップロード履歴").font(.headline)
+                        Text("進行中・再開が必要な追加").font(.headline)
                         VStack(spacing: 0) {
-                            ForEach(uploads, id: \.id) { value in
+                            ForEach(pending, id: \.id) { value in
                                 HStack(spacing: 12) {
                                     Button {
                                         selectedID = value.id; draft = nil
@@ -217,17 +226,32 @@ struct UploadScreen: View {
                                             .help("アップロード予定を取り消す").accessibilityLabel("\(value.name)のアップロード予定を取り消す")
                                     }
                                 }.padding(16).disabled(model.busy)
-                                if value.id != uploads.last?.id { Divider().padding(.leading, 16) }
+                                if value.id != pending.last?.id { Divider().padding(.leading, 16) }
                             }
                         }.background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
                     }
+                }
+                if let latest = finished.first {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("最近の保存結果", systemImage: "checkmark.circle.fill").font(.headline).foregroundStyle(.green)
+                        UploadReceipt(plan: latest, encrypted: encrypted)
+                        DisclosureGroup("過去の保存結果（\(finished.count)件）") {
+                            ForEach(finished, id: \.id) { value in
+                                UploadReceipt(plan: value, encrypted: encrypted).padding(.vertical, 10)
+                                Divider()
+                            }
+                        }
+                    }.padding(24).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 16))
                 }
                 DisclosureGroup("アップロードについて") {
                     Text("Macの原本は残ります。自動同期は行いません。1ファイル5GiB・1回20GiB・10,000件まで。隠しファイル・リンク・対象外形式は送信しません。確認待ちの予定は取り消せます。")
                         .padding(.top, 8)
                 }.font(.caption).foregroundStyle(.secondary)
             }.frame(maxWidth: 800, alignment: .leading).padding(32).frame(maxWidth: .infinity)
-        }.background(Color(nsColor: .windowBackgroundColor))
+        }.background(Color(nsColor: .windowBackgroundColor)).controlSize(.large)
+            .onChange(of: finished.map(\.id)) { ids in
+                if let selectedID, ids.contains(selectedID) { self.selectedID = nil; draft = nil }
+            }
             .dropDestination(for: URL.self) { urls, _ in
                 guard !choosingDisabled, !encrypted || model.encryptionReady else { return false }
                 let directories = urls.filter { $0.isFileURL && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
@@ -235,6 +259,28 @@ struct UploadScreen: View {
                 addFolders(directories)
                 return true
             }
+    }
+}
+struct UploadReceipt: View {
+    let plan: FolderUpload
+    var encrypted = false
+    private var timestamp: String {
+        guard let value = plan.completedAt else { return "完了日時：旧履歴のため記録なし" }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ja_JP")
+        formatter.timeZone = TimeZone(identifier: "Asia/Tokyo")
+        formatter.dateFormat = "M月d日 HH:mm"
+        return formatter.string(from: Date(timeIntervalSince1970: value)) + " 保存完了（日本時間）"
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(plan.name).font(.headline)
+            Text(timestamp).foregroundStyle(.secondary)
+            Text("登録 \(plan.completed)件 · \(size(plan.byteSize))").font(.title3).monospacedDigit()
+            Text(encrypted ? "内容・ファイル名：暗号化済み" : "通常保存（内容の暗号化なし）").font(.callout)
+            if let count = plan.duplicateCount, count > 0 { Text("重複のため追加なし \(count)件").foregroundStyle(.secondary) }
+            if plan.skipped > 0 { Text("対象外 \(plan.skipped)件").foregroundStyle(.secondary) }
+        }
     }
 }
 struct UploadStatus: View {
@@ -265,8 +311,8 @@ struct UploadPlanView: View {
             Divider()
             VStack(alignment: .leading, spacing: 6) {
                 Label(encrypted ? "保存先 · 暗号化して非公開S3へ" : "保存先 · 非公開S3", systemImage: "lock.shield").font(.callout.weight(.medium))
-                Text(plan.bucket).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                DisclosureGroup("接続の詳細") {
+                DisclosureGroup("保存先の詳細") {
+                    Text(plan.bucket).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                     Text("\(plan.region) · \(plan.profile)").font(.caption).foregroundStyle(.secondary).padding(.top, 6)
                 }.font(.caption).foregroundStyle(.secondary)
             }
@@ -291,7 +337,7 @@ struct UploadPlanView: View {
             if ["uploading", "queued"].contains(plan.state) {
                 Button("送信と予約を停止") { Task { await model.run { try await model.upload(plan, pause: true, encrypted: encrypted) } } }
             } else if plan.state == "complete" {
-                Label("保存と照合が完了しました", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                UploadReceipt(plan: plan, encrypted: encrypted)
                 Text("Macの原本はそのまま残っています。").font(.caption).foregroundStyle(.secondary)
             } else {
                 if encrypted {
@@ -327,7 +373,7 @@ struct LibraryScreen: View {
     private func rootLink(_ plan: FolderUpload) -> some View {
         if let root = plan.folders.first(where: { $0.parentId == nil }) {
             let key: String = plan.id + ":" + root.id
-            NavigationLink(value: key) { FolderTile(name: plan.name) }.buttonStyle(.plain)
+            NavigationLink(value: key) { FolderTile(name: plan.name, protection: root.isLocked ? "通常保存 · PIN解除中" : "通常保存 · 内容暗号化なし", detail: "\(plan.items.count)件 · \(size(plan.byteSize))") }.buttonStyle(.plain)
                 .contextMenu { Button("フォルダをごみ箱へ", role: .destructive) { rootTrash = plan } }
         }
     }
@@ -335,7 +381,7 @@ struct LibraryScreen: View {
         NavigationStack(path: $path) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("鍵なしのフォルダはそのまま開けます。鍵付きは、PINを入力するまで名前も表示しません。")
+                    Text("通常保存のフォルダです。PINは一覧を隠すための鍵で、内容の暗号化とは別です。")
                         .font(.callout).foregroundStyle(.secondary)
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 130, maximum: 210), spacing: 12)], spacing: 12) {
                         ForEach(model.library, id: \.id) { plan in
@@ -558,31 +604,56 @@ struct LightVideoScreen: View {
 struct CloudTrashScreen: View {
     @EnvironmentObject var model: MacModel
     @Environment(\.dismiss) private var dismiss
-    @State private var purging: CloudTrashEntry?
+    @State private var selected: Set<String> = []
+    @State private var targets: [CloudTrashEntry] = []
+    @State private var confirming = false
+    @State private var loaded = false
+    private var selectedEntries: [CloudTrashEntry] { model.trash.filter { selected.contains($0.id) } }
+    private func confirm(_ entries: [CloudTrashEntry]) { targets = entries; confirming = true }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack { Text("S3のごみ箱").font(.title2); Spacer(); Button("閉じる") { dismiss() } }
-            Text("完全削除すると原本・小画像・過去バージョンを消去し、復元できません。Macの元ファイルは保持します。").foregroundStyle(.secondary)
-            if model.trash.isEmpty { Text("ごみ箱は空です。").padding() }
-            List(model.trash, id: \.id) { entry in
+            HStack { Text("ごみ箱").font(.title2); Spacer(); Button("閉じる") { dismiss() }.disabled(model.busy) }
+            Text("通常フォルダの表示中の対象だけを操作します。暗号化フォルダは対象外です。Macの元ファイルは保持します。")
+                .foregroundStyle(.secondary)
+            HStack {
+                Text("\(model.trash.count)件 · \(size(model.trash.reduce(0) { $0 + $1.byteSize }))").monospacedDigit()
+                Spacer()
+                Button("選択した\(selected.count)件を完全削除", role: .destructive) { confirm(selectedEntries) }.disabled(selectedEntries.isEmpty || !loaded)
+                Button("表示中をすべて完全削除", role: .destructive) { confirm(model.trash) }.disabled(model.trash.isEmpty || !loaded)
+            }
+            Button("ごみ箱を更新", systemImage: "arrow.clockwise") { Task { await model.run { try await model.refreshTrash(); loaded = true } } }
+            if !loaded && model.error.isEmpty { ProgressView("ごみ箱を確認しています…") }
+            else if model.trash.isEmpty { Text("ごみ箱は空です。").padding() }
+            List(model.trash, id: \.id, selection: $selected) { entry in
                 HStack {
-                    VStack(alignment: .leading) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text(entry.name)
-                        Text("\(entry.itemIds.count)ファイル · \(size(entry.byteSize))" + (entry.state == "deleting" ? " · 完全削除中（再試行可能）" : "")).font(.caption).foregroundStyle(.secondary)
+                        Text("\(entry.itemIds.count)ファイル · \(size(entry.byteSize))" + (entry.state == "deleting" ? " · 完全削除中（再試行可能）" : "")).font(.callout).foregroundStyle(.secondary)
                     }
                     Spacer()
                     Button("復元") { Task { await model.run { try await model.trashAction(entry, action: "restore") } } }.disabled(entry.state != "trashed")
-                    Button(entry.state == "deleting" ? "完全削除を再試行" : "完全削除", role: .destructive) { purging = entry }
-                }
+                    Button(entry.state == "deleting" ? "完全削除を再試行" : "完全削除", role: .destructive) { confirm([entry]) }
+                }.padding(.vertical, 6).tag(entry.id)
             }
-            if !model.error.isEmpty { Text(model.error).foregroundStyle(.red) }
-        }.padding(20).frame(minWidth: 650, minHeight: 380).disabled(model.busy)
-        .task { await model.run { try await model.refreshTrash() } }
-        .confirmationDialog("「\(purging?.name ?? "対象")」を完全削除しますか？", isPresented: Binding(get: { purging != nil }, set: { if !$0 { purging = nil } }), titleVisibility: .visible) {
-            if let entry = purging {
-                Button("完全削除する", role: .destructive) { Task { await model.run { try await model.trashAction(entry, action: "purge"); purging = nil } } }
+            Text("⌘クリックで複数選択できます。削除・復元は更新後のiPhoneの一覧にも反映されます。操作はMacから行います。")
+                .font(.caption).foregroundStyle(.secondary)
+            if !model.trashProgress.isEmpty { ProgressView(model.trashProgress) }
+            if !model.error.isEmpty { Text(model.error).foregroundStyle(.red).textSelection(.enabled) }
+            if !model.notice.isEmpty { Text(model.notice).foregroundStyle(.green) }
+        }.padding(24).frame(minWidth: 760, minHeight: 460).controlSize(.large)
+        .interactiveDismissDisabled(model.busy)
+        .disabled(model.busy)
+        .task { await model.run { try await model.refreshTrash(); loaded = true } }
+        .onChange(of: model.trash.map(\.id)) { ids in selected.formIntersection(Set(ids)) }
+        .confirmationDialog("\(targets.count)件を完全削除しますか？", isPresented: $confirming, titleVisibility: .visible) {
+            Button("\(targets.count)件を完全削除する", role: .destructive) {
+                let snapshot = targets
+                Task { await model.purgeTrash(snapshot) }
             }
-        } message: { Text("この操作は取り消せません。S3上の対象データと過去バージョンを削除します。") }
+            Button("キャンセル", role: .cancel) { targets = [] }
+        } message: {
+            Text("対象の原本 \(targets.reduce(0) { $0 + $1.itemIds.count })ファイル・\(size(targets.reduce(0) { $0 + $1.byteSize }))と、小画像・過去バージョンを削除します。復元できません。表示されていない鍵付き項目は対象外です。")
+        }
     }
 }
 

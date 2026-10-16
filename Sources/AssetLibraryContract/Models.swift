@@ -411,8 +411,9 @@ public struct FolderUpload: Codable, Sendable {
     public let items: [FolderUploadItem]
     public let progress: UploadProgress?
     public let duplicateCount: Int64?
+    public let completedAt: Double?
     private enum CodingKeys: String, CodingKey {
-        case id, name, bucket, profile, region, state, error, byteSize, completed, skipped, folders, items, progress, duplicateCount
+        case id, name, bucket, profile, region, state, error, byteSize, completed, skipped, folders, items, progress, duplicateCount, completedAt
     }
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -430,6 +431,7 @@ public struct FolderUpload: Codable, Sendable {
         try container.encode(items, forKey: .items)
         try container.encodeIfPresent(progress, forKey: .progress)
         try container.encodeIfPresent(duplicateCount, forKey: .duplicateCount)
+        try container.encodeIfPresent(completedAt, forKey: .completedAt)
     }
 }
 

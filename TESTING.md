@@ -20,13 +20,15 @@ Mac画面・操作・配布の未確認項目は [Mac SwiftUI](docs/MAC-SWIFTUI.
 
 ## 暗号化送信と閲覧
 
-アップロード改善は `local-api/tests/test_upload_improvements.py` で非同期確認・最大2件並列・予約順・停止／失敗後の残り停止・分割SHA-256・断片再開／期限切れ・再起動後の暗号文同一性と原本保持を検証する。実AWSのmultipartと実素材の速度は別途確認。[仕様](docs/UPLOAD-IMPROVEMENTS.md)。
+アップロード改善は `local-api/tests/test_upload_improvements.py` で非同期確認・4件並列照合／最大4件並列送信・予約順・停止／失敗後の残り停止・分割SHA-256・断片再開／期限切れ・再起動後の暗号文同一性と原本保持を検証する。実AWSのmultipartと実素材の速度は別途確認。[仕様](docs/UPLOAD-IMPROVEMENTS.md)。
 
 `verify-desktop.sh`はMacと暗号化helperを先にビルドし、Pythonの暗号化専用転送テストを省略せず実行する。`test_encrypted_upload.py`で通常履歴との分離・ciphertextのみの送信・原本保持・鍵の非保存・違う鍵による再開拒否・再送抑止・API境界を検証。`test_encrypted_reader.py`は本人認証・不正キー拒否・版固定・5分署名・no-storeを確認。`SealedMediaTests`は復旧ファイル／PBKDF2、AES-GCMの改ざん・順序・ID・鍵の結び付け、境界をまたぐ復号と合成動画のAVAsset読込を検証。
 
 実AWSの合成素材検証は明示実行時だけ`MEDIA_HUB_SEALED_FIXTURE`を指定して`testAWSInteroperabilityWhenFixtureIsProvided`を実行する。通常検証では1件skipであり、実AWS検証の成功を代替しない。テスト用鍵・素材だけで実署名Range GETを復号し、作成した正確な版だけを除去する。本人の鍵作成・復旧パスワード入力・実素材の送信は本人が操作する。
 
 PDFの通常／暗号化送信・2ページ目の描画・PDF自体のパスワード・再ロック拒否は[PDF検証](docs/PDF-SUPPORT.md)を参照。
+
+Macの`UploadBatchTests`は準備と送信の順序、停止・送信失敗後に後続フォルダを送らないことを確認する。JPEG縮小読み込みは通常／暗号化の向き・寸法・EXIF除去・元ファイル保持を`test_upload_improvements.py`で検証する。
 
 ## Fast Validation
 アーカイブ変更では、個別切り替え→通常一覧から除外→アーカイブ表示→原本取得→通常へ戻す、選択一括操作、コレクション全体操作、保管状態を指定した検索をブラウザで確認する。DB移行、再起動保持、所属と原本ハッシュ保持、ごみ箱復元、revision/token競合と全件ロールバック、ページ上限を超えるコレクション操作は隔離APIテストで検証する。
@@ -106,3 +108,7 @@ S3ごみ箱は `local-api/tests/test_cloud_trash.py` と `backend/tests/test_rea
 内容重複の除外は `local-api/tests/test_upload_duplicates.py` で確認する。検証対象・境界は[送信時の内容重複チェック](docs/UPLOAD-DUPLICATES.md)。実暗号化helperを事前にMacビルドで更新する。
 
 費用対策は重複テストでカタログの版/ETag/保存先分離・暗号文のみの再利用・64MiB境界・件数超過・原本欠損時の再照合を確認する。iOS統合テストは先読み1枚/窓/累計予算と動画除外、Swift UsageTestsは動画アクセスログの累積増分と二重加算拒否を確認する。実動画のログ報告範囲とAWS請求との照合は別途必要。
+
+16MiB管理情報はCatalogPreflightTestsとReaderTestsで上限ちょうど／1バイト超・1万件の見積もり・認可後断片と応答サイズ・途中変更を確認する。CatalogTransferTestsは最大サイズの復元・順序／破損拒否・暗号化16断片を確認し、EncryptedUploadTestsは実helperで最大316バイトの暗号化付加分と重複検査を検証する。iOS統合テストは16MiBの16回取得と最終SHA-256不一致時のキャッシュ拒否を確認する。
+
+Mac UI第1段はTrashBatchTestsで確認対象の固定・逐次処理・途中失敗／再ロック後の後続削除停止を検証。FolderUploadTestsで完了日時の成功時記録・失敗時欠落・旧履歴の非補完・契約互換を確認。費用画面は共有SwiftUIのためMacとiOSをビルドする。複数選択・確認取消・期間切替・実画面の視認性は手動確認を別途行う。

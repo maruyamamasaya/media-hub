@@ -17,6 +17,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'backend'))
 
 from .service import VaultError
+from catalog_limits import MAX_CATALOG_BYTES
 
 GIB = 1024 ** 3
 PDF_MAX_BYTES = 250 * 1024 ** 2
@@ -39,6 +40,8 @@ def signature(info):
 
 PART_SIZE = 16 * 1024 ** 2
 MULTIPART_THRESHOLD = 64 * 1024 ** 2
+SCAN_WORKERS = 4
+UPLOAD_WORKERS = 4
 
 
 def hash_stream(stream, target=None, progress=None):
@@ -141,7 +144,7 @@ class S3CLI(MultipartUpload):
                 key = item['Key']
                 if key == own_catalog:
                     continue
-                if item['Size'] > 4 * 1024 ** 2:
+                if item['Size'] > MAX_CATALOG_BYTES:
                     raise VaultError('integrity', '別の一覧情報を確認できません。', 409)
                 with tempfile.TemporaryDirectory(prefix='media-hub-reference-') as temp:
                     target = Path(temp) / 'catalog.json'
@@ -227,7 +230,7 @@ class FolderUploads:
             'items': [{k: item[k] for k in ('id', 'name', 'folderId', 'relativePath', 'byteSize', 'state')} for item in plan['items']],
             'completed': sum(i['state'] == 'verified' for i in plan['items']), 'skipped': plan['skipped'],
             'duplicateCount': plan.get('duplicateCount', 0),
-        } | ({'progress': dict(self.live[plan['id']])} if plan['id'] in self.live and
+        } | ({'completedAt': plan['completedAt']} if 'completedAt' in plan else {}) | ({'progress': dict(self.live[plan['id']])} if plan['id'] in self.live and
              plan['byteSize'] == self.live[plan['id']]['totalBytes'] else {})
 
     def list(self):
@@ -341,6 +344,8 @@ class FolderUploads:
                             else:
                                 return False
                             with Image.open(image_source) as image:
+                                # JPEG decoder downsizing avoids expanding full-resolution pixels.
+                                image.draft('RGB', (640, 640))
                                 preview = ImageOps.exif_transpose(image).convert('RGBA')
                                 preview.info.clear()
                                 preview.thumbnail((320, 320))
@@ -401,7 +406,7 @@ class FolderUploads:
                             entry[field] = item[field]
                 original_bytes = manifest_path.read_bytes()
                 atomic_json(manifest_path, manifest)
-                if manifest_path.stat().st_size > 4 * 1024 ** 2:
+                if manifest_path.stat().st_size > MAX_CATALOG_BYTES:
                     raise VaultError('too_large', 'フォルダ管理情報が大きすぎます。小さいフォルダ単位で送信してください。', 413)
                 # Avoid unnecessary version creation on repeated backfills.
                 if json.loads(original_bytes) != manifest:
@@ -455,8 +460,8 @@ class FolderUploads:
                     'folders': plan['folders'], 'items': items}
         manifest['keyID' if sealed else 'rootId'] = plan.get('keyID', plan['rootId'])
         size = len(json.dumps(manifest, ensure_ascii=False).encode('utf-8'))
-        if size > 4 * 1024 ** 2:
-            raise VaultError('too_large', '送信後のフォルダ管理情報が4MiBを超える可能性があります。小さいフォルダ単位で確認し直してください。', 413)
+        if size > MAX_CATALOG_BYTES:
+            raise VaultError('too_large', '送信後のフォルダ管理情報が16MiBを超える可能性があります。小さいフォルダ単位で確認し直してください。', 413)
         return size
 
     def scan(self, body, progress=None):
@@ -513,24 +518,36 @@ class FolderUploads:
         read_bytes = 0
         if progress:
             progress(0, source_root.name, total_bytes)
-        for path, expected_signature in candidates:
+        progress_lock = threading.Lock()
+        def inspect(candidate):
+            path, expected_signature = candidate
+            reported = 0
+            def report(amount):
+                nonlocal read_bytes, reported
+                with progress_lock:
+                    read_bytes += amount - reported
+                    reported = amount
+                    if progress:
+                        progress(read_bytes, path.name, total_bytes)
             with self.open_source(source_root, path) as stream:
                 before = os.fstat(stream.fileno())
                 if signature(before) != expected_signature:
                     raise VaultError('changed_file', '確認中に原本が変更されました。もう一度確認してください。', 409)
                 digest, composite = hash_stream(stream,
-                    progress=(lambda n: progress(read_bytes + n, path.name, total_bytes)) if progress else None)
+                    progress=report)
                 if signature(before) != signature(os.fstat(stream.fileno())):
                     raise VaultError('changed_file', '確認中に原本が変更されました。もう一度確認してください。', 409)
             relative = path.relative_to(source_root).as_posix()
             folder = path.parent.relative_to(source_root).as_posix()
             asset_id = str(uuid.uuid5(uuid.UUID(root_id), 'asset:' + relative))
-            items.append({'id': asset_id, 'name': path.name, 'folderId': folder_id('' if folder == '.' else folder),
+            return {'id': asset_id, 'name': path.name, 'folderId': folder_id('' if folder == '.' else folder),
                           'relativePath': relative, 'byteSize': before.st_size, 'sha256': digest,
                           'multipartSHA256': composite, 'signature': signature(before), 'state': 'pending',
                           'objectKey': f'media-hub/originals/{asset_id}/{digest}',
-                          'mimeType': mimetypes.guess_type(path.name)[0] or 'application/octet-stream'})
-            read_bytes += before.st_size
+                          'mimeType': mimetypes.guess_type(path.name)[0] or 'application/octet-stream'}
+        # Preserve deterministic catalog order, while hashing independent files concurrently.
+        with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as executor:
+            items = list(executor.map(inspect, candidates))
         plan = {'id': plan_id, 'rootId': root_id, 'name': source_root.name, 'sourceRoot': str(source_root),
                 **{k: body[k] for k in ('bucket', 'profile', 'region')}, 'state': 'planned', 'error': '',
                 'folders': folders, 'items': items, 'skipped': skipped, 'byteSize': sum(i['byteSize'] for i in items), 'stop': False}
@@ -640,7 +657,7 @@ class FolderUploads:
         return remote
 
     def parallel_items(self, plan, work):
-        """Two small files at a time; large files run alone to bound staging space."""
+        """Overlap small-file preparation, transfer and previews; bound large staging."""
         self._progress_workers = getattr(self, '_progress_workers', {})
         self._progress_workers[plan['id']] = {}
         self._transfer_started = getattr(self, '_transfer_started', {})
@@ -683,7 +700,7 @@ class FolderUploads:
                 if signature(os.fstat(stream.fileno())) != item['signature']:
                     raise VaultError('changed_file', '確認後に原本が変更されました。送信を停止しました。', 409)
         pending = []
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=UPLOAD_WORKERS) as executor:
             for item in plan['items']:
                 if failed.is_set() or self.stopped(plan['id']):
                     break
@@ -694,7 +711,7 @@ class FolderUploads:
                     if not failed.is_set() and not self.stopped(plan['id']):
                         run(item)
                 else:
-                    if len(pending) == 2:
+                    if len(pending) == UPLOAD_WORKERS:
                         done, _ = wait(pending, return_when=FIRST_COMPLETED)
                         for future in done:
                             future.result()
@@ -798,7 +815,7 @@ class FolderUploads:
             from .upload_duplicates import prepare
             prepare(self, plan, client)
             if plan.get('noCatalog'):
-                plan['state'] = 'complete'
+                plan['state'] = 'complete'; plan.setdefault('completedAt', time.time())
                 return
             def work(item):
                 expected = base64.b64encode(bytes.fromhex(item['sha256'])).decode()
@@ -847,7 +864,7 @@ class FolderUploads:
                                 ('id', 'name', 'folderId', 'byteSize', 'sha256', 'objectKey', 'mimeType', 'versionId', 'thumbnailKey')} for i in plan['items']]}
                 manifest_path = self.path(plan_id).parent / 'catalog.json'
                 atomic_json(manifest_path, manifest)
-                if manifest_path.stat().st_size > 4 * 1024 ** 2:
+                if manifest_path.stat().st_size > MAX_CATALOG_BYTES:
                     raise VaultError('too_large', 'フォルダ管理情報が大きすぎます。小さいフォルダ単位で送信してください。', 413)
                 digest = base64.b64encode(hashlib.sha256(manifest_path.read_bytes()).digest()).decode()
                 key = f'media-hub/catalogs/{plan["rootId"]}/{plan_id}.json'
@@ -857,7 +874,7 @@ class FolderUploads:
                     remote = client.head(key)
                 if not remote or remote.get('ChecksumSHA256') != digest or remote.get('ContentLength') != manifest_path.stat().st_size:
                     raise VaultError('integrity', 'フォルダ管理情報の照合に失敗しました。', 409)
-                plan['state'] = 'complete'
+                plan['state'] = 'complete'; plan.setdefault('completedAt', time.time())
         except TransferPaused:
             plan['state'] = 'paused'
         except Exception as exc:

@@ -3,6 +3,7 @@ import json
 import os
 import re
 import base64
+import hashlib
 from urllib.parse import unquote
 from app import client, response, valid_id
 import folder_security as privacy
@@ -10,7 +11,7 @@ import encrypted_reader
 import catalog_trash
 import usage_report
 
-MAX_CATALOG_BYTES = 4 * 1024 * 1024
+from catalog_limits import MAX_CATALOG_BYTES, CATALOG_CHUNK_BYTES, MAX_CATALOG_RESPONSE_BYTES
 
 
 def catalog(s3, bucket, root, upload):
@@ -172,7 +173,34 @@ def handler(event, context):
                     params = {'Bucket': bucket, 'Key': items[identity]['thumbnailKey'], 'ResponseCacheControl': 'private, no-store'}
                     urls[identity] = s3.generate_presigned_url('get_object', Params=params, ExpiresIn=300, HttpMethod='GET')
                 return reply(200, {'urls': urls, 'expiresIn': 300})
-            return reply(200, public_catalog(value))
+            public = public_catalog(value)
+            query = event.get('queryStringParameters') or {}
+            if 'catalogOffset' in query:
+                # Filter permissions on EVERY chunk. A digest binds chunks to one
+                # exact public projection, including trash and lock visibility.
+                offset_text = query['catalogOffset']
+                if not isinstance(offset_text, str) or not re.fullmatch(r'0|[1-9][0-9]{0,8}', offset_text):
+                    raise ValueError('Invalid catalog offset')
+                raw = json.dumps(public, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+                if len(raw) > MAX_CATALOG_RESPONSE_BYTES:
+                    raise ValueError('Catalog response too large')
+                digest = hashlib.sha256(raw).hexdigest()
+                offset = int(offset_text)
+                if offset >= len(raw) or offset % CATALOG_CHUNK_BYTES:
+                    raise ValueError('Invalid catalog offset')
+                if offset and query.get('catalogDigest') != digest:
+                    return reply(409, {'error': 'Catalog changed; reload'})
+                chunk = raw[offset:offset + CATALOG_CHUNK_BYTES]
+                end = offset + len(chunk)
+                return reply(200, {'data': base64.b64encode(chunk).decode('ascii'),
+                                   'offset': offset, 'totalBytes': len(raw), 'sha256': digest,
+                                   'nextOffset': end if end < len(raw) else None})
+            # Legacy clients retain small responses; never exceed Lambda's
+            # buffered response limit after nested JSON escaping.
+            result = reply(200, public)
+            if len(json.dumps(result).encode('utf-8')) > 5 * 1024 * 1024:
+                return reply(413, {'error': 'Catalog requires chunked download; update app'})
+            return result
         if parts[3] != 'items' or parts[5] != 'url' or not valid_id(parts[4]):
             return reply(404, {'error': 'Not found'})
         item = next((i for i in value['items'] if i['id'] == parts[4]), None)

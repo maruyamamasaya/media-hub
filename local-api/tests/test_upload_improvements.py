@@ -121,8 +121,80 @@ class UploadSchedulingTests(unittest.TestCase):
         deadline = time.monotonic() + 5
         while self.service.running and time.monotonic() < deadline: time.sleep(.01)
         self.assertFalse(self.service.running)
-    def test_two_workers_overlap_but_never_exceed_limit_and_progress_is_valid(self):
-        plan = self.scan(); barrier = threading.Barrier(2); lock = threading.Lock(); active = 0; peak = 0
+    def test_scan_hashes_four_files_together_keeps_order_and_monotonic_progress(self):
+        barrier = threading.Barrier(4)
+        original = hash_stream
+        active = peak = 0
+        lock = threading.Lock()
+        values = []
+        def inspect(*args, **kwargs):
+            nonlocal active, peak
+            with lock:
+                active += 1; peak = max(peak, active)
+            try:
+                barrier.wait(timeout=3)
+                return original(*args, **kwargs)
+            finally:
+                with lock: active -= 1
+        with patch('vault.folder_upload.hash_stream', side_effect=inspect):
+            plan = self.service.scan({'path':str(self.source), 'bucket':'test-bucket', 'profile':'test', 'region':'ap-northeast-1'},
+                                     progress=lambda amount, name, total: values.append(amount))
+        self.assertEqual(peak, 4)
+        self.assertEqual(values, sorted(values))
+        self.assertEqual(values[-1], 24)
+        raw = self.service.read(plan['id'])
+        self.assertEqual([item['name'] for item in raw['items']], [f'{n}.png' for n in range(4)])
+        for item in raw['items']:
+            self.assertEqual(item['sha256'], hashlib.sha256((self.source / item['name']).read_bytes()).hexdigest())
+
+    def test_large_files_remain_single_worker_to_bound_staging(self):
+        plan = self.scan()
+        active = peak = 0
+        lock = threading.Lock()
+        def work(item):
+            nonlocal active, peak
+            with lock:
+                active += 1; peak = max(peak, active)
+            time.sleep(.01)
+            with lock: active -= 1
+        with patch('vault.folder_upload.MULTIPART_THRESHOLD', 1):
+            self.assertTrue(self.service.parallel_items(self.service.read(plan['id']), work))
+        self.assertEqual(peak, 1)
+
+    def test_changed_source_during_parallel_scan_does_not_save_a_plan(self):
+        original = hash_stream
+        def inspect(stream, **kwargs):
+            result = original(stream, **kwargs)
+            (self.source / '0.png').write_bytes(b'changed-source')
+            return result
+        with patch('vault.folder_upload.hash_stream', side_effect=inspect):
+            with self.assertRaises(VaultError): self.scan()
+        self.assertEqual(self.service.list(), [])
+        self.assertEqual(self.cloud.puts, [])
+
+    def test_jpeg_preview_downsampling_preserves_orientation_and_original(self):
+        from PIL import Image
+        from vault.encrypted_upload import EncryptedUploads
+        source = self.source / 'rotated.jpg'
+        exif = Image.Exif(); exif[274] = 6; exif[271] = 'private-camera'
+        Image.new('RGB', (2400, 1600), 'red').save(source, exif=exif)
+        original = source.read_bytes()
+        plan = self.scan(); self.service.upload(plan['id'])
+        raw = self.service.read(plan['id'])
+        self.assertEqual(raw['state'], 'complete', raw['error'])
+        item = next(i for i in raw['items'] if i['name'] == source.name)
+        normal = self.cloud.objects[item['thumbnailKey']]
+        target = self.root / 'sealed-preview.png'
+        self.assertTrue(EncryptedUploads.thumbnail(source, target, 'image/jpeg'))
+        for data in (normal, target.read_bytes()):
+            self.assertLessEqual(len(data), 50_000)
+            with Image.open(io.BytesIO(data)) as image:
+                self.assertLess(image.width, image.height)
+                self.assertLessEqual(max(image.size), 320)
+                self.assertFalse(image.getexif())
+        self.assertEqual(source.read_bytes(), original)
+    def test_four_workers_overlap_but_never_exceed_limit_and_progress_is_valid(self):
+        plan = self.scan(); barrier = threading.Barrier(4); lock = threading.Lock(); active = 0; peak = 0
         original = self.cloud.put
         def put(path, key, digest, mime, etag=None):
             nonlocal active, peak
@@ -134,7 +206,7 @@ class UploadSchedulingTests(unittest.TestCase):
                 with lock: active -= 1
             return original(path, key, digest, mime, etag)
         with patch.object(self.cloud, 'put', side_effect=put): self.service.upload(plan['id'])
-        raw = self.service.read(plan['id']); self.assertEqual(raw['state'], 'complete', raw['error']); self.assertEqual(peak, 2)
+        raw = self.service.read(plan['id']); self.assertEqual(raw['state'], 'complete', raw['error']); self.assertEqual(peak, 4)
         self.assertEqual(self.service.public(raw)['completed'], 4)
     def test_queue_requires_confirmation_runs_in_order_and_failure_stops_remaining(self):
         one, two = self.scan(), self.scan()

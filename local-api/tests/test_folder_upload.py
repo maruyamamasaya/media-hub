@@ -73,6 +73,31 @@ class FolderUploadTests(unittest.TestCase):
     def scan(self):
         return self.service.scan({'path': str(self.source), 'bucket': 'test-bucket', 'profile': 'test-profile', 'region': 'ap-northeast-1'})
 
+    def test_completion_time_is_recorded_only_after_success_and_survives_refresh(self):
+        plan = self.scan()
+        self.assertNotIn('completedAt', plan)
+        self.service.upload(plan['id'])
+        saved = self.service.read(plan['id'])
+        self.assertEqual(saved['state'], 'complete')
+        self.assertGreater(saved['completedAt'], 0)
+        stamp = saved['completedAt']
+        self.service.save(saved)
+        public = self.service.public(self.service.read(plan['id']))
+        self.assertEqual(public['completedAt'], stamp)
+        validate_contract(public, 'FolderUpload')
+        # Old completed records must not acquire a fabricated time on a read/save.
+        saved.pop('completedAt')
+        self.service.save(saved)
+        self.assertNotIn('completedAt', self.service.list()[0])
+
+    def test_failed_catalog_does_not_claim_completion_time(self):
+        plan = self.scan()
+        self.cloud.fail_catalog = True
+        self.service.upload(plan['id'])
+        result = self.service.public(self.service.read(plan['id']))
+        self.assertEqual(result['state'], 'failed')
+        self.assertNotIn('completedAt', result)
+
     def test_hierarchy_empty_folder_contract_and_local_only_scan(self):
         (self.source / '.secret.png').write_bytes(b'secret')
         (self.source / 'ignore.txt').write_bytes(b'ignored')

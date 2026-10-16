@@ -28,7 +28,7 @@ photo-hub/
 
 ## Data Flow
 
-Macの通常／暗号化送信は非同期確認 → 確認済みフォルダ予約 → 最大2件並列（大容量は単独） → 条件付きPUT／再開可能multipart → 管理情報確定。暗号文だけの再開用保持と照合は[アップロード改善](docs/UPLOAD-IMPROVEMENTS.md)。
+Macの通常／暗号化送信は4件並列の非同期照合 → 最初の確認済みフォルダ送信と次の1フォルダ準備を重ねる → 最大4件並列（大容量は単独） → 条件付きPUT／再開可能multipart → 管理情報確定。後続送信は前フォルダの保存完了後だけ開始する。暗号文だけの再開用保持と照合は[アップロード改善](docs/UPLOAD-IMPROVEMENTS.md)。
 暗号化用は独立したEncryptedUploads → 同梱MediaHubCrypto（CryptoKit・鍵はstdinのみ） → encrypted-objects／encrypted-catalogsの非公開S3 → 本人限定GET URL → 共通SealedRangeReader／AVAssetResourceLoaderで必要断片をメモリ復号。鍵はKeychain、復旧ファイルはPBKDF2＋AES-GCM。[暗号化構成](docs/ENCRYPTED-UPLOAD.md)。
 
 現行S3閲覧: Macの確認済み入力 → 原本と最大50KBのサムネイルを非公開S3へ → カタログ登録 → Macの認証付きローカルAPI／iPhoneの本人・フォルダ認可＋5分署名GET → 表示メモリ。Macの転送用ファイルは応答完了、原本表示用ファイルは閲覧終了で破棄し、長期閲覧キャッシュは作成しない。[小画像保管方針](decisions/0015-private-thumbnails-no-durable-cache.md)。
@@ -51,6 +51,8 @@ SQLite → JSON正常版 + latestポインター → 空SQLiteへの復元
 iOS通常閲覧はCloudViewerModel → メモリ／ReaderImageDiskStore専用actorの最大1GBキャッシュ → 未取得サムネイルの最大60件一括署名 → 非公開S3。署名要求と同一画像の同時取得を共有し、ディスク／原本照合をUIから分離する。暗号化内容はメモリのみ。[キャッシュと一括署名](docs/S3-READER.md)。
 
 PDFは共通`MediaPDFReader`（PDFKit）でMac／iPhoneに表示する。通常・暗号化の既存送信経路を使い、Mac同梱helperで先頭ページの小画像を作る。暗号化PDFの閲覧はメモリ復号のみ。[PDF仕様](docs/PDF-SUPPORT.md)。
+
+管理情報は共通上限16MiB。通常iPhone一覧はAWSが認可後の公開JSONを1MiB断片で返し、共有`CatalogDownload`が全体SHA-256・順序・最大20MiB予算を照合してから採用する。暗号化一覧はS3 Range GETとメモリ復号を維持する。詳細は[閲覧仕様](docs/S3-READER.md)と[判断](decisions/0024-catalog-sixteen-mib.md)。
 
 ## API Structure
 新Webは `/api/v1` のassets/imports/tags/collections/status。ファイルはAsset/File ID経由。更新はrevisionで409競合を検出。一覧は検索条件に結び付いたcursorでページ分割。正本は [共通契約](contracts/README.md)。

@@ -34,12 +34,18 @@ struct SquareTile<Content: View>: View {
 }
 struct FolderTile: View {
     let name: String
+    var protection: String = ""
+    var detail: String = ""
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
         SquareTile(title: name) {
             Image(systemName: "folder.fill").font(.system(size: 48, weight: .light))
                 .foregroundStyle(Color.accentColor.opacity(0.65))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        if !protection.isEmpty { Text(protection).font(.caption.weight(.medium)).foregroundStyle(.secondary) }
+        if !detail.isEmpty { Text(detail).font(.caption).foregroundStyle(.secondary) }
+        }.accessibilityElement(children: .combine)
     }
 }
 struct GallerySelection: Identifiable { let id: String }
@@ -60,7 +66,7 @@ struct FolderScreen: View {
         ScrollView {
             LazyVGrid(columns: mediaColumns, spacing: 12) {
                 ForEach(folders, id: \.id) { folder in
-                    NavigationLink(value: "\(plan.id):\(folder.id)") { FolderTile(name: folder.name) }
+                    NavigationLink(value: "\(plan.id):\(folder.id)") { FolderTile(name: folder.name, protection: folder.isLocked ? "通常保存 · PIN解除中" : "通常保存 · 内容暗号化なし") }
                         .buttonStyle(.plain)
                         .contextMenu { Button("フォルダをごみ箱へ", role: .destructive) { trashFolder = folder.id; confirmingTrash = true } }
                 }

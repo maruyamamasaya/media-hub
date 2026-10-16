@@ -10,20 +10,39 @@ struct SealedKeyManagement: View {
     @State private var operation: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Label("暗号化の鍵", systemImage: "key.fill").font(.title2.weight(.semibold))
-            Text(model.encryptionReady ? "鍵はこのMacのKeychainで保管しています。iPhoneには復旧ファイルを読み込んでください。" : "最初に鍵を作成し、パスワード付きの復旧ファイルを保存してください。")
-                .foregroundStyle(.secondary)
-            HStack {
-                if model.encryptionReady { Button("復旧ファイルを保存") { operation = "export" } }
-                else { Button("鍵を作って復旧ファイルを保存") { operation = "create" }.buttonStyle(.borderedProminent) }
-                Button("復旧ファイルを読み込む") { operation = "import" }
+            if model.encryptionReady {
+                Label("このMacは追加する準備ができています", systemImage: "checkmark.shield.fill")
+                    .font(.headline).foregroundStyle(.green)
+                DisclosureGroup("iPhoneで開く・鍵のバックアップ") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("復旧ファイルを保存し、iPhoneの暗号化フォルダで読み込むと、同じ写真を開けます。読み込みには保存時のパスワードが必要です。")
+                            .font(.callout).foregroundStyle(.secondary)
+                        HStack {
+                            Button("復旧ファイルを保存") { operation = "export" }
+                            Button("別の鍵を読み込む") { operation = "import" }
+                        }
+                        recoveryNote
+                    }.padding(.top, 8)
+                }
+            } else {
+                Label("最初に1回だけ、鍵を準備します", systemImage: "key.fill").font(.headline)
+                Text("「鍵を準備する」からパスワードを決め、復旧ファイルを保存してください。その後、フォルダを選んで追加できます。")
+                    .font(.callout).foregroundStyle(.secondary)
+                HStack {
+                    Button("鍵を準備する") { operation = "create" }.buttonStyle(.borderedProminent)
+                    Button("既存の復旧ファイルを使う") { operation = "import" }
+                }
+                recoveryNote
             }
-            Text("復旧ファイルとパスワードの両方を失うと、鍵のない端末では復号できません。パスワードはファイルと別に保管してください。")
-                .font(.caption).foregroundStyle(.secondary)
         }.padding(24).frame(maxWidth: 800, alignment: .leading)
+            .disabled(model.busy || model.encryptedUploads.contains { ["uploading", "queued"].contains($0.state) })
             .sheet(isPresented: Binding(get: { operation != nil }, set: { if !$0 { operation = nil } })) {
                 SealedKeySheet(operation: operation ?? "import")
             }
+    }
+    private var recoveryNote: some View {
+        Text("復旧ファイルとパスワードは別々に保管してください。両方を失うと、鍵のない端末では開けなくなります。")
+            .font(.caption).foregroundStyle(.secondary)
     }
 }
 struct SealedKeySheet: View {
@@ -140,11 +159,11 @@ struct SealedRootTile: View {
     var body: some View {
         Group {
             if let catalog {
-                NavigationLink { SealedFolderScreen(root: root, catalog: catalog, secret: secret, folderID: catalog.folders.first { $0.parentId == nil }?.id) } label: { FolderTile(name: catalog.name) }.buttonStyle(.plain)
+                NavigationLink { SealedFolderScreen(root: root, catalog: catalog, secret: secret, folderID: catalog.folders.first { $0.parentId == nil }?.id) } label: { FolderTile(name: catalog.name, protection: "内容・名前：暗号化済み", detail: "\(catalog.items.count)件") }.buttonStyle(.plain)
             } else { FolderTile(name: failed ? "復号できません" : "暗号化フォルダを読込中…") }
         }.task {
             let identity = model.privacyID
-            let reader = macSealedReader(model, root: root, secret: secret, objectID: nil, length: nil, maximum: 4 * 1024 * 1024)
+            let reader = macSealedReader(model, root: root, secret: secret, objectID: nil, length: nil, maximum: Int64(CatalogLimits.maximumBytes))
             do {
                 let value = try JSONDecoder().decode(SealedCatalog.self, from: await reader.allData())
                 try value.validate(root: root, secret: secret)

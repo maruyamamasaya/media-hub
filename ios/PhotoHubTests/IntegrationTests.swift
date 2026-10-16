@@ -10,6 +10,37 @@ import CryptoKit
 
 @MainActor
 final class IntegrationTests: XCTestCase {
+    func testSixteenMiBCatalogDownloadAndCorruptionRejection() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ReaderBatchProtocol.self]
+        let authentication = Authentication(network: URLSession(configuration: configuration), storage: FixtureRefreshTokens())
+        let model = CloudViewerModel(authentication: authentication, networkConfiguration: configuration)
+        model.configuration.api = "https://fixture.invalid"
+        model.configuration.domain = "https://fixture.invalid"
+        model.configuration.clientID = "test-client"
+        model.configuration.owner = UUID().uuidString
+        model.signedIn = true
+        let root = try JSONDecoder().decode(ReadRoot.self, from: Data(#"{"id":"catalog","rootId":"root","name":"Large","itemCount":0,"byteSize":0}"#.utf8))
+        var value: [String: Any] = ["id": "catalog", "rootId": "root", "name": "Large", "items": [],
+                                  "folders": [["id": "folder", "name": "Folder", "parentId": NSNull(), "isLocked": false]]]
+        let base = try JSONSerialization.data(withJSONObject: value).count
+        value["name"] = "Large" + String(repeating: "x", count: CatalogLimits.maximumBytes - base)
+        ReaderBatchProtocol.catalogData = try JSONSerialization.data(withJSONObject: value)
+        ReaderBatchProtocol.catalogCount = 0
+        ReaderBatchProtocol.corruptCatalog = false
+        defer { ReaderBatchProtocol.catalogData = nil; ReaderBatchProtocol.corruptCatalog = false }
+        XCTAssertEqual(ReaderBatchProtocol.catalogData?.count, CatalogLimits.maximumBytes)
+        let catalog = try await model.catalog(root)
+        XCTAssertEqual(catalog.id, "catalog")
+        XCTAssertEqual(ReaderBatchProtocol.catalogCount, 16)
+        XCTAssertEqual(model.catalogs[model.catalogKey("root", "catalog")]?.name, value["name"] as? String)
+        model.relock()
+        ReaderBatchProtocol.corruptCatalog = true
+        do { _ = try await model.catalog(root); XCTFail("Corrupted chunks must not become a cached catalog") }
+        catch { }
+        XCTAssertTrue(model.catalogs.isEmpty)
+    }
+
     func testPDFDownloadIntegrityRelockAndMemoryDecryption() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [ReaderBatchProtocol.self]
@@ -558,12 +589,26 @@ private final class ReaderBatchProtocol: URLProtocol {
     static var batchCount = 0
     static var imageCount = 0
     static var imageData = Data()
+    static var catalogData: Data?
+    static var catalogCount = 0
+    static var corruptCatalog = false
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         let data: Data
         if request.url!.path.contains("oauth2/token") {
             data = Data(#"{"access_token":"test-only-access"}"#.utf8)
+        } else if let catalog = Self.catalogData,
+                  let offsetText = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "catalogOffset" })?.value,
+                  let offset = Int(offsetText) {
+            Self.catalogCount += 1
+            let end = min(offset + CatalogLimits.chunkBytes, catalog.count)
+            var part = catalog.subdata(in: offset..<end)
+            if Self.corruptCatalog, end == catalog.count { part[0] ^= 1 }
+            let digest = SHA256.hash(data: catalog).map { String(format: "%02x", $0) }.joined()
+            data = try! JSONSerialization.data(withJSONObject: [
+                "data": part.base64EncodedString(), "offset": offset, "totalBytes": catalog.count,
+                "sha256": digest, "nextOffset": end < catalog.count ? end as Any : NSNull()])
         } else if request.url!.path.hasPrefix("/image/") {
             Self.imageCount += 1
             data = Self.imageData

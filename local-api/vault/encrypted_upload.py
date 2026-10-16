@@ -8,10 +8,12 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 
 from .folder_upload import FolderUploads, S3CLI, atomic_json, signature, hash_stream, remote_matches, TransferPaused, MULTIPART_THRESHOLD
 from .service import VaultError
+from catalog_limits import MAX_CATALOG_BYTES
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -183,6 +185,7 @@ class EncryptedUploads:
                 else:
                     return False
                 with Image.open(input_file) as image:
+                    image.draft('RGB', (640, 640))
                     preview = ImageOps.exif_transpose(image).convert('RGBA'); preview.info.clear(); preview.thumbnail((320, 320))
                     while True:
                         preview.save(target, format='PNG', optimize=True)
@@ -200,7 +203,7 @@ class EncryptedUploads:
             prepare(self.uploads, plan, client,
                 lambda path, identity: self.decrypt_catalog(path, identity, key_id, key), key_id)
             if plan.get('noCatalog'):
-                plan['state'] = 'complete'
+                plan['state'] = 'complete'; plan.setdefault('completedAt', time.time())
                 return
             def work(item):
                 if item['state'] == 'verified':
@@ -227,7 +230,7 @@ class EncryptedUploads:
                     'items': [{k: i.get(k) for k in ('id','name','folderId','byteSize','sha256','mimeType','objectID','thumbnailID','thumbnailBytes')} for i in plan['items']]}
                 with tempfile.TemporaryDirectory(dir=self.uploads.root, prefix='sealed-staging-') as temp:
                     plain = Path(temp) / 'catalog.json'; atomic_json(plain, manifest)
-                    if plain.stat().st_size > 4 * 1024 ** 2:
+                    if plain.stat().st_size > MAX_CATALOG_BYTES:
                         raise VaultError('too_large', 'フォルダを小さい単位へ分けてください。', 413)
                     catalog_key = f'media-hub/encrypted-catalogs/{key_id}/{plan_id}.bin'
                     remote = client.head(catalog_key)
@@ -239,7 +242,7 @@ class EncryptedUploads:
                             raise VaultError('integrity', '暗号化管理情報の照合に失敗しました。', 409)
                     if not remote:
                         raise VaultError('integrity', '暗号化管理情報を確認できません。', 409)
-                plan['state'] = 'complete'
+                plan['state'] = 'complete'; plan.setdefault('completedAt', time.time())
         except TransferPaused:
             plan['state'] = 'paused'
         except Exception as exc:

@@ -31,6 +31,30 @@ class EncryptedUploadTests(unittest.TestCase):
     def prepare(self):
         value = self.scan(); raw = self.service.uploads.read(value['id']); raw['keyID'] = KEY_ID; self.service.uploads.save(raw)
         return value
+    def test_sixteen_mib_catalog_helper_and_duplicate_reader(self):
+        import uuid
+        from vault.upload_duplicates import catalogs
+        from catalog_limits import MAX_CATALOG_BYTES, MAX_ENCRYPTED_CATALOG_BYTES
+        identity, folder = str(uuid.uuid4()), str(uuid.uuid4())
+        value = {'schemaVersion': 1, 'id': identity, 'keyID': KEY_ID, 'name': 'Boundary',
+                 'folders': [{'id': folder, 'name': 'Folder', 'parentId': None}], 'items': []}
+        base = len(json.dumps(value).encode())
+        value['name'] += 'x' * (MAX_CATALOG_BYTES - base)
+        source, encrypted = self.root / 'catalog.json', self.root / 'catalog.bin'
+        source.write_text(json.dumps(value))
+        self.service.encrypt(source, encrypted, identity, KEY)
+        self.assertEqual(encrypted.stat().st_size, MAX_ENCRYPTED_CATALOG_BYTES)
+        restored = self.service.decrypt_catalog(encrypted, identity, KEY_ID, KEY)
+        self.assertEqual(restored, value)
+        object_key = f'media-hub/encrypted-catalogs/{KEY_ID}/{identity}.bin'
+        self.cloud.objects[object_key] = encrypted.read_bytes()
+        result = list(catalogs(self.cloud, f'media-hub/encrypted-catalogs/{KEY_ID}/', self.root,
+                              decode=lambda path, upload: self.service.decrypt_catalog(path, upload, KEY_ID, KEY)))
+        self.assertEqual(result[0][0]['id'], identity)
+        value['name'] += 'x'; source.write_text(json.dumps(value)); encrypted.unlink()
+        self.service.encrypt(source, encrypted, identity, KEY)
+        with self.assertRaises(VaultError): self.service.decrypt_catalog(encrypted, identity, KEY_ID, KEY)
+
     def test_scan_and_discard_are_local_and_normal_keys_are_absent(self):
         plan = self.scan(); validate_contract(plan, 'FolderUpload')
         self.assertEqual(self.cloud.puts, [])

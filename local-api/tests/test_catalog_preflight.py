@@ -8,7 +8,7 @@ class CatalogPreflightTests(FolderUploadTests):
     def test_large_catalog_rejected_before_cloud_or_thread(self):
         plan = self.scan()
         raw = self.service.read(plan['id'])
-        raw['items'] = [deepcopy(raw['items'][0]) for _ in range(10000)]
+        raw['items'] = [dict(deepcopy(raw['items'][0]), name='写真' * 200) for _ in range(10000)]
         self.service.save(raw)
         with patch('vault.folder_upload.threading.Thread') as thread:
             with self.assertRaises(VaultError):
@@ -18,6 +18,25 @@ class CatalogPreflightTests(FolderUploadTests):
             thread.assert_not_called()
         self.assertEqual(self.cloud.puts, [])
         self.assertEqual(self.service.read(plan['id'])['state'], 'planned')
+
+    def test_ten_thousand_normal_items_now_fit(self):
+        raw = self.service.read(self.scan()['id'])
+        raw['items'] = [deepcopy(raw['items'][0]) for _ in range(10000)]
+        size = self.service.check_catalog_capacity(raw)
+        self.assertGreater(size, 4 * 1024 ** 2)
+        self.assertLessEqual(size, 16 * 1024 ** 2)
+
+    def test_exact_boundary_normal_and_sealed(self):
+        raw = self.service.read(self.scan()['id'])
+        for sealed in (False, True):
+            self.service.sealed_catalog = sealed
+            raw['name'] = 'Boundary'
+            base = self.service.check_catalog_capacity(raw)
+            raw['name'] += 'x' * (16 * 1024 ** 2 - base)
+            self.assertEqual(self.service.check_catalog_capacity(raw), 16 * 1024 ** 2)
+            raw['name'] += 'x'
+            with self.assertRaises(VaultError):
+                self.service.check_catalog_capacity(raw)
 
     def test_utf8_and_thumbnail_reserve_and_sealed_shape(self):
         raw = self.service.read(self.scan()['id'])

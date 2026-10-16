@@ -13,7 +13,7 @@ final class SealedMediaTests: XCTestCase {
         // Known synthetic integration-test key, never saved to the user's Keychain.
         let secret = try MediaSecret(keyID: fixture.root.keyID, masterKey: Data(repeating: 0x31, count: 32))
         let catalogHTTP = SealedHTTP { fixture.catalogURL }
-        let catalogReader = SealedRangeReader(objectID: fixture.root.id, master: secret.masterKey, maximumLength: 4 * 1024 * 1024) { range in try await catalogHTTP.bytes(range) }
+        let catalogReader = SealedRangeReader(objectID: fixture.root.id, master: secret.masterKey, maximumLength: Int64(CatalogLimits.maximumBytes)) { range in try await catalogHTTP.bytes(range) }
         let catalog = try JSONDecoder().decode(SealedCatalog.self, from: await catalogReader.allData())
         try catalog.validate(root: fixture.root, secret: secret)
         XCTAssertEqual(catalog.name, "SyntheticEncryptionCheck")

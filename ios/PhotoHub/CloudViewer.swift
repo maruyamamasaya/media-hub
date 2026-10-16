@@ -67,7 +67,7 @@ final class CloudViewerModel: ObservableObject {
         Task {
             defer { if catalogUpdates[key] == update { catalogUpdates[key] = nil } }
             do {
-                let value = try await get("/catalogs/\(key)", as: ReadCatalog.self)
+                let value = try await fetchCatalog(key)
                 guard identity == sessionID else { return }
                 catalogs[key] = value; catalogDates[key] = Date()
             } catch is CancellationError { }
@@ -225,6 +225,18 @@ final class CloudViewerModel: ObservableObject {
         guard response.statusCode == 200, data.count <= 5 * 1024 * 1024 else { throw ViewerError.connection }
         return try JSONDecoder().decode(T.self, from: data)
     }
+    private func fetchCatalog(_ key: String) async throws -> ReadCatalog {
+        let identity = sessionID
+        var download = CatalogDownload()
+        while let offset = download.nextOffset {
+            try Task.checkCancellation()
+            let digest = download.digest.map { "&catalogDigest=\($0)" } ?? ""
+            let chunk = try await get("/catalogs/\(key)?catalogOffset=\(offset)\(digest)", as: CatalogChunk.self)
+            guard identity == sessionID else { throw CancellationError() }
+            try download.append(chunk)
+        }
+        return try JSONDecoder().decode(ReadCatalog.self, from: download.data)
+    }
     func refresh() async {
         error = ""
         do {
@@ -246,7 +258,7 @@ final class CloudViewerModel: ObservableObject {
         let identity = sessionID
         try await sealedRequests.wait()
         guard identity == sessionID else { throw CancellationError() }
-        let value = try await get("/catalogs/\(key)", as: ReadCatalog.self)
+        let value = try await fetchCatalog(key)
         guard identity == sessionID else { throw CancellationError() }
         catalogs[key] = value; catalogDates[key] = Date()
         return value

@@ -25,6 +25,9 @@ final class MacModel: ObservableObject {
     @Published var scanTotalBytes: Int64 = 0
     @Published var scanRemainingSeconds: Int64?
     @Published var scanning = false
+    @Published private(set) var uploadBatch: UploadBatch?
+    @Published private(set) var uploadBatchStopping = false
+    private var uploadBatchEncrypted = false
     @Published var privacyID = UUID()
     @Published var hiddenPagesOpen = false
     @Published var concealed = false
@@ -177,6 +180,64 @@ final class MacModel: ObservableObject {
         }
         return plan
     }
+    func prepareUploads(_ paths: [String], encrypted: Bool,
+                        onPrepared: (FolderUpload) -> Void) async throws {
+        let batch = UploadBatch()
+        let identity = privacyID
+        uploadBatch = batch; uploadBatchEncrypted = encrypted; uploadBatchStopping = false
+        defer { uploadBatch = nil; uploadBatchStopping = false }
+        var plans: [String: FolderUpload] = [:]
+        func check() throws {
+            try batch.check()
+            guard identity == privacyID, !concealed else { throw CancellationError() }
+        }
+        do {
+            try await batch.execute(paths, prepare: { path in
+                try check()
+                let plan = try await self.scan(path, encrypted: encrypted)
+                try check()
+                plans[plan.id] = plan; onPrepared(plan)
+                return plan.id
+            }, start: { id in
+                try check()
+                guard let plan = plans[id] else { throw CancellationError() }
+                try await self.upload(plan, encrypted: encrypted)
+                // Stop may arrive while Keychain or the start request is awaiting.
+                if batch.stopped || identity != self.privacyID || self.concealed {
+                    try await self.runtime.action("/\(encrypted ? "encrypted-uploads" : "folder-uploads")/\(id)/pause")
+                    throw CancellationError()
+                }
+            }, wait: { id in
+                while true {
+                    try check()
+                    try await self.refreshUploads()
+                    try check()
+                    guard let plan = (encrypted ? self.encryptedUploads : self.uploads).first(where: { $0.id == id }) else {
+                        throw MacAPIError.message("送信履歴を確認できません。残りの追加を停止しました。")
+                    }
+                    if plan.state == "complete" { return }
+                    if !["uploading", "queued"].contains(plan.state) {
+                        throw MacAPIError.message(plan.error.isEmpty ? "送信が停止したため、残りの追加も停止しました。" : plan.error)
+                    }
+                    try await Task.sleep(nanoseconds: 300_000_000)
+                }
+            })
+        } catch {
+            // No later folder is sent after a preparation or transfer failure.
+            if let id = batch.activeID {
+                try? await runtime.action("/\(encrypted ? "encrypted-uploads" : "folder-uploads")/\(id)/pause")
+            }
+            throw error
+        }
+    }
+    func stopUploadPreparation() async {
+        guard let batch = uploadBatch else { return }
+        batch.stopped = true; uploadBatchStopping = true
+        if let id = batch.activeID {
+            do { try await runtime.action("/\(uploadBatchEncrypted ? "encrypted-uploads" : "folder-uploads")/\(id)/pause") }
+            catch { handle(error) }
+        }
+    }
     func uploadQueue(_ plans: [FolderUpload], encrypted: Bool) async throws {
         var body: [String: Any] = ["confirmUpload": true, "planIds": plans.map(\.id)]
         if encrypted {
@@ -209,6 +270,33 @@ final class MacModel: ObservableObject {
         try await runtime.action("/folder-library/\(entry.planId)/trash", body: ["action": action, "confirm": true, "entryId": entry.id])
         try await refreshTrash()
         try await refresh()
+    }
+    @Published var trashProgress = ""
+    func purgeTrash(_ entries: [CloudTrashEntry]) async {
+        await run {
+            let identity = privacyID
+            var completed = 0
+            defer { trashProgress = "" }
+            do {
+                try await TrashBatch.execute(entries, authorized: { identity == privacyID && !concealed }) { entry in
+                    trashProgress = "完全削除中 \(completed + 1) / \(entries.count)件"
+                    try await runtime.action("/folder-library/\(entry.planId)/trash", body: ["action": "purge", "confirm": true, "entryId": entry.id])
+                    completed += 1
+                }
+            } catch {
+                // Refresh once after partial success; retain the original failure.
+                if identity == privacyID, !concealed {
+                    try? await refreshTrash()
+                    handle(error)
+                    self.error = "\(completed) / \(entries.count)件の削除が完了。残りはごみ箱で確認して再試行してください。\n" + self.error
+                }
+                return
+            }
+            guard identity == privacyID, !concealed else { return }
+            notice = "ごみ箱の\(completed)件を完全削除しました。"
+            try await refreshTrash()
+            try await refresh()
+        }
     }
     func unlock(_ password: String) async throws {
         let identity = privacyID

@@ -43,7 +43,7 @@ Resources:
       Handler: reader.handler
       Runtime: python3.12
       Architectures: [arm64]
-      MemorySize: 128
+      MemorySize: 256
       Timeout: 15
       Environment:
         Variables:

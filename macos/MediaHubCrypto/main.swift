@@ -21,11 +21,11 @@ do {
     if request.operation == "catalog" {
         let url = URL(fileURLWithPath: request.source)
         let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max
-        guard size <= 4 * 1024 * 1024 + 124 else { throw SealedError.tooLarge }
+        guard size <= CatalogLimits.maximumEncryptedBytes else { throw SealedError.tooLarge }
         let cipher = try Data(contentsOf: url)
         guard cipher.count >= SealedMedia.headerSize else { throw SealedError.invalid }
         let length = cipher.subdata(in: 52..<60).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
-        guard length > 0, length <= 4 * 1024 * 1024 else { throw SealedError.tooLarge }
+        guard length > 0, length <= UInt64(CatalogLimits.maximumBytes) else { throw SealedError.tooLarge }
         let header = try SealedMedia.parse(Data(cipher.prefix(SealedMedia.headerSize)), objectID: request.objectID, length: Int64(length))
         guard cipher.count == header.encryptedLength, let keyID = request.keyID else { throw SealedError.invalid }
         var plain = Data()

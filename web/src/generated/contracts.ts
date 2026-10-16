@@ -177,6 +177,7 @@ export interface FolderUpload {
   items: FolderUploadItem[];
   progress?: UploadProgress;
   duplicateCount?: number;
+  completedAt?: number;
 }
 
 export interface ReadRoot {

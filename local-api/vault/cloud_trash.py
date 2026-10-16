@@ -11,6 +11,7 @@ from datetime import datetime
 
 from .folder_upload import atomic_json
 from .service import VaultError
+from catalog_limits import MAX_CATALOG_BYTES
 from .folder_privacy import security
 import catalog_trash
 
@@ -41,12 +42,12 @@ class CloudTrash:
         client = self.uploads.client_factory(plan['bucket'], plan['profile'], plan['region'])
         key = f'media-hub/catalogs/{plan["rootId"]}/{plan["id"]}.json'
         head = client.head(key)
-        if not head or not 0 < head['ContentLength'] <= 4 * 1024 ** 2:
+        if not head or not 0 < head['ContentLength'] <= MAX_CATALOG_BYTES:
             raise VaultError('integrity', 'S3の一覧情報を確認できません。', 409)
         with tempfile.TemporaryDirectory(dir=self.uploads.root, prefix='trash-read-') as temp:
             path = Path(temp) / 'catalog.json'
             client.download(key, head.get('VersionId'), path)
-            if path.stat().st_size > 4 * 1024 ** 2:
+            if path.stat().st_size > MAX_CATALOG_BYTES:
                 raise VaultError('integrity', '一覧情報が大きすぎます。', 409)
             value = json.loads(path.read_text())
         if value.get('id') != plan['id'] or value.get('rootId') != plan['rootId']:
@@ -69,7 +70,7 @@ class CloudTrash:
         with tempfile.TemporaryDirectory(dir=self.uploads.root, prefix='trash-save-') as temp:
             path = Path(temp) / 'catalog.json'
             atomic_json(path, value)
-            if path.stat().st_size > 4 * 1024 ** 2:
+            if path.stat().st_size > MAX_CATALOG_BYTES:
                 raise VaultError('too_large', '一覧情報が大きすぎます。', 413)
             digest = base64.b64encode(hashlib.sha256(path.read_bytes()).digest()).decode()
             client.put(path, key, digest, 'application/json', etag=etag)

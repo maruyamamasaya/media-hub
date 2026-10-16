@@ -54,6 +54,28 @@ class CloudTrashTests(unittest.TestCase):
     def mutate(self, action, **fields):
         return self.trash.mutate(self.plan['id'], dict(action=action, confirm=True, **fields))
 
+    def test_sixteen_mib_catalog_load_save_and_normal_duplicate_scan(self):
+        from catalog_limits import MAX_CATALOG_BYTES
+        from vault.upload_duplicates import catalogs
+        plan = self.uploads.read(self.plan['id'])
+        key = f'media-hub/catalogs/{plan["rootId"]}/{plan["id"]}.json'
+        value = json.loads(self.cloud.objects[key]); value['catalogCreatedAt'] = 1
+        plan['catalogCreatedAt'] = 1
+        base = len(json.dumps(value).encode())
+        value['name'] += 'x' * (MAX_CATALOG_BYTES - base)
+        self.cloud.objects[key] = json.dumps(value).encode()
+        client, loaded_key, etag, loaded = self.trash.load(plan)
+        self.assertEqual(len(self.cloud.objects[key]), MAX_CATALOG_BYTES)
+        self.trash.save(client, loaded_key, etag, loaded, plan)
+        self.assertEqual(len(self.cloud.objects[key]), MAX_CATALOG_BYTES)
+        scanned = list(catalogs(self.cloud, 'media-hub/catalogs/', self.uploads.root))
+        self.assertEqual(scanned[0][0]['id'], plan['id'])
+        loaded['name'] += 'x'
+        with self.assertRaises(VaultError): self.trash.save(client, key, etag, loaded, plan)
+        self.cloud.objects[key] = json.dumps(loaded).encode()
+        with self.assertRaises(VaultError): self.trash.load(plan)
+        with self.assertRaises(VaultError): list(catalogs(self.cloud, 'media-hub/catalogs/', self.uploads.root))
+
     def test_library_cache_expires_and_mutation_invalidates(self):
         with patch.object(self.trash, 'load', wraps=self.trash.load) as load:
             with patch('vault.cloud_trash.time.monotonic', return_value=100):

@@ -692,6 +692,9 @@
         },
         "duplicateCount": {
           "type": "integer"
+        },
+        "completedAt": {
+          "type": "number"
         }
       }
     },

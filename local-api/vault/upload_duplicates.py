@@ -10,8 +10,9 @@ import tempfile
 import uuid
 
 from .service import VaultError
+from catalog_limits import MAX_CATALOG_BYTES, MAX_ENCRYPTED_CATALOG_BYTES
 
-MAX_CATALOG = 4 * 1024 ** 2
+MAX_CATALOG = MAX_CATALOG_BYTES
 MAX_SCAN_DOWNLOAD_BYTES = 64 * 1024 ** 2
 MAX_SCAN_CATALOGS = 2000
 
@@ -75,7 +76,7 @@ def catalogs(client, prefix, root, decode=None, cache=None, scope=None):
             if count > MAX_SCAN_CATALOGS:
                 raise VaultError('duplicate_check_limit', '重複確認の一覧が2,000件を超えたため、追加送信を停止しました。', 413)
             head = client.head(object_key)
-            limit = MAX_CATALOG + 124 if decode else MAX_CATALOG
+            limit = MAX_ENCRYPTED_CATALOG_BYTES if decode else MAX_CATALOG
             if not head or not 0 < head['ContentLength'] <= limit:
                 raise VaultError('integrity', '重複確認用の一覧情報を読み取れません。', 409)
             # Revalidate current metadata every time; never reuse across destinations or revisions.

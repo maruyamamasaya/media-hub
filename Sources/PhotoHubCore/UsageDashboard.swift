@@ -6,6 +6,7 @@ public struct UsageDashboard: View {
     private let report: UsageReport?
     private let activity: [UsageActivity]
     private let device: String
+    @State private var historyDays = 30
     public init(report: UsageReport?, activity: [UsageActivity], device: String) {
         self.report = report; self.activity = activity; self.device = device
     }
@@ -26,16 +27,30 @@ public struct UsageDashboard: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("S3保存量").font(.headline)
                     Text(bytes(report.storageBytes)).font(.largeTitle).monospacedDigit()
+                    if let estimate = report.storageEstimateYen {
+                        Text("保存費の目安 \(yen(estimate))／月").font(.title2).monospacedDigit()
+                    }
+                    Text("保存費のみの試算です。転送・API料金を含む確定請求ではありません。")
+                        .font(.callout).foregroundStyle(.secondary)
                     Text("更新：\(report.updatedAt) · Macで更新した集計").font(.caption).foregroundStyle(.secondary)
                     Text("鍵付き・暗号化フォルダを含む総量です。素材名や内容は表示しません。").font(.caption).foregroundStyle(.secondary)
                 }
+                Picker("グラフの期間", selection: $historyDays) {
+                    Text("7日").tag(7)
+                    Text("30日").tag(30)
+                    Text("90日").tag(90)
+                }.pickerStyle(.segmented)
                 GroupBox("保存量の推移 · GiB") {
-                    Chart(report.history, id: \.date) { point in
+                    Chart(report.history.filter { inPeriod($0.date, latest: report.history.map(\.date).max()) }, id: \.date) { point in
                         LineMark(x: .value("記録日", day(point.date)), y: .value("保存量 GiB", Double(point.storageBytes) / 1_073_741_824))
                         PointMark(x: .value("記録日", day(point.date)), y: .value("保存量 GiB", Double(point.storageBytes) / 1_073_741_824))
                             .accessibilityLabel(point.date).accessibilityValue(bytes(point.storageBytes))
-                    }.frame(height: 180).chartYAxisLabel("GiB")
-                    Text("更新した日の記録だけを表示 · 最大90日分").font(.caption).foregroundStyle(.secondary)
+                    }.frame(height: 230).chartYAxisLabel("GiB")
+                        .chartYScale(domain: .automatic(includesZero: true))
+                        .chartXAxis { AxisMarks(values: .automatic(desiredCount: 4)) { _ in AxisGridLine(); AxisTick(); AxisValueLabel(format: .dateTime.month().day()) } }
+                        .chartYAxis { AxisMarks(position: .leading) }
+                        .padding(.vertical, 12)
+                    Text("最新の集計日から選択期間の記録を表示。記録が1日だけなら点で表示します。").font(.caption).foregroundStyle(.secondary)
                 }
                 GroupBox("保存量の内訳") {
                     VStack(spacing: 8) {
@@ -59,12 +74,26 @@ public struct UsageDashboard: View {
                 }
                 if report.history.contains(where: { $0.storageEstimateYen != nil }) {
                     GroupBox("保存費の目安の推移 · 円／月") {
-                        Chart(report.history.filter { $0.storageEstimateYen != nil }, id: \.date) { point in
+                        Chart(report.history.filter { $0.storageEstimateYen != nil && inPeriod($0.date, latest: report.history.map(\.date).max()) }, id: \.date) { point in
                             LineMark(x: .value("記録日", day(point.date)), y: .value("保存費 円／月", point.storageEstimateYen ?? 0))
                             PointMark(x: .value("記録日", day(point.date)), y: .value("保存費 円／月", point.storageEstimateYen ?? 0))
                                 .accessibilityLabel(point.date).accessibilityValue(yen(point.storageEstimateYen ?? 0))
-                        }.frame(height: 150).chartYAxisLabel("円／月")
+                        }.frame(height: 210).chartYAxisLabel("円／月")
+                            .chartYScale(domain: .automatic(includesZero: true))
+                            .chartXAxis { AxisMarks(values: .automatic(desiredCount: 4)) { _ in AxisGridLine(); AxisTick(); AxisValueLabel(format: .dateTime.month().day()) } }
+                            .chartYAxis { AxisMarks(position: .leading) }
+                            .padding(.vertical, 12)
                         Text("各記録日の保存量を1か月保持した場合の試算です。").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                DisclosureGroup("日付ごとの容量と保存費を見る") {
+                    ForEach(report.history.filter { inPeriod($0.date, latest: report.history.map(\.date).max()) }.sorted { $0.date > $1.date }, id: \.date) { point in
+                        HStack {
+                            Text(point.date)
+                            Spacer()
+                            Text(bytes(point.storageBytes))
+                            Text(point.storageEstimateYen.map { yen($0) + "／月" } ?? "未集計")
+                        }.font(.callout).monospacedDigit().padding(.vertical, 6)
                     }
                 }
                 if let budget = report.budget {
@@ -82,8 +111,15 @@ public struct UsageDashboard: View {
             } else {
                 Text("S3保存量はMacで「AWSから更新」を押すと表示されます。").foregroundStyle(.secondary)
             }
-            activityPanel
+            DisclosureGroup("この端末の通信記録を見る") { activityPanel }
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+    private func inPeriod(_ date: String, latest: String?) -> Bool {
+        guard let latest else { return false }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+        let cutoff = calendar.date(byAdding: .day, value: -(historyDays - 1), to: day(latest)) ?? day(latest)
+        return day(date) >= cutoff && day(date) <= day(latest)
     }
     private func breakdown(_ label: String, _ amount: Int64, total: Int64) -> some View {
         VStack(alignment: .leading, spacing: 4) {
